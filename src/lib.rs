@@ -1,3 +1,11 @@
+//! [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
+//! [![Apache License 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
+//! [![docs.rs](https://docs.rs/asn1-rs/badge.svg)](https://docs.rs/asn1-rs)
+//! [![crates.io](https://img.shields.io/crates/v/asn1-rs.svg)](https://crates.io/crates/asn1-rs)
+//! [![Download numbers](https://img.shields.io/crates/d/asn1-rs.svg)](https://crates.io/crates/asn1-rs)
+//! [![Github CI](https://github.com/rusticata/asn1-rs/workflows/Continuous%20integration/badge.svg)](https://github.com/rusticata/asn1-rs/actions)
+//! [![Minimum rustc version](https://img.shields.io/badge/rustc-1.63.0+-lightgray.svg)](#rust-version-requirements)
+//!
 //! # BER/DER Parsers/Encoders
 //!
 //! A set of parsers/encoders for Basic Encoding Rules (BER [[X.690]]) and Distinguished Encoding Rules(DER
@@ -10,7 +18,7 @@
 //! This crate is a rewrite of [der-parser](https://crates.io/crates/der-parser) to propose a more data-oriented API,
 //! and add generalized support for serialization.
 //!
-//! Many ideas were initially borrowed from the [crypto/utils/der](https://github.com/RustCrypto/utils/tree/master/der) crate (like
+//! Many ideas were borrowed from the [crypto/utils/der](https://github.com/RustCrypto/utils/tree/master/der) crate (like
 //! the `Any`/`TryFrom`/`FromDer` mechanism), adapted and merged into a generalized BER/DER crate.
 //! Credits (and many thanks) go to Tony Arcieri for writing the original crate.
 //!
@@ -22,28 +30,19 @@
 //! [[X.690]] also defines Distinguished Encoding Rules (DER), which is BER with added rules to
 //! ensure canonical and unequivocal binary representation of objects.
 //!
-//! The choice of which one to use is usually guided by the specification of the data format based
+//! The choice of which one to use is usually guided by the speficication of the data format based
 //! on BER or DER: for example, X.509 uses DER as encoding representation.
 //!
-//! The main traits for parsing are the [`BerParser`](crate::from_ber::BerParser) and
-//! [`DerParser`](crate::from_der::DerParser) traits.
-//! These traits provide methods to parse binary input wrapped in
-//! [`Input`](crate::input::Input), and return either the remaining (unparsed) bytes and the
-//! parsed object, or an error.
-//! The [`Input`] types is a simple wrapper around `&[u8]` to keep information on data span. This is
-//! especially useful to print information or to debug parsing errors.
-//!
-//! This crates also provides the [`FromBer`](crate::from_ber::FromBer) and
-//! [`FromDer`](crate::from_der::FromDer) traits for parsing (working on slices).
+//! The main traits for parsing are the [`FromBer`] and [`FromDer`] traits.
+//! These traits provide methods to parse binary input, and return either the remaining (unparsed) bytes
+//! and the parsed object, or an error.
 //!
 //! The parsers follow the interface from [nom], and the [`ParseResult`] object is a specialized version
 //! of `nom::IResult`. This means that most `nom` combinators (`map`, `many0`, etc.) can be used in
 //! combination to objects and methods from this crate. Reading the nom documentation may
 //! help understanding how to write and combine parsers and use the output.
 //!
-//! **Minimum Supported Rust Version**: 1.71
-//!
-//! **`no_std` support**: `asn1-rs` supports `#[no_std]` (with a requirement on `alloc`).
+//! **Minimum Supported Rust Version**: 1.68
 //!
 //! # Recipes
 //!
@@ -93,8 +92,7 @@
 //!
 //! # BER/DER encoders
 //!
-//! BER/DER encoding is symmetrical to decoding, using the traits
-//! [`ToBer`](crate::to_ber::ToBer) and [`ToDer`](crate::to_der::ToDer) traits.
+//! BER/DER encoding is symmetrical to decoding, using the traits `ToBer` and [`ToDer`] traits.
 //! These traits provide methods to write encoded content to objects with the `io::Write` trait,
 //! or return an allocated `Vec<u8>` with the encoded data.
 //! If the serialization fails, an error is returned.
@@ -103,9 +101,8 @@
 //!
 //! Writing 2 BER integers:
 //!
-//! ```rust
-//! # #[cfg(feature = "std")]
-//! # fn test_content() {
+#![cfg_attr(feature = "std", doc = r#"```rust"#)]
+#![cfg_attr(not(feature = "std"), doc = r#"```rust,compile_fail"#)]
 //! use asn1_rs::{Integer, ToDer};
 //!
 //! let mut writer = Vec::new();
@@ -120,14 +117,12 @@
 //!                0x02, 0x03, 0x01, 0x00, 0x00,
 //! ];
 //! assert_eq!(&writer, bytes);
-//! # }
 //! ```
 //!
-//! Similarly to `BerParser`/`DerParser`, serialization methods are also implemented for primitive types:
+//! Similarly to `FromBer`/`FromDer`, serialization methods are also implemented for primitive types:
 //!
-//! ```rust
-//! # #[cfg(feature = "std")]
-//! # fn test_content() {
+#![cfg_attr(feature = "std", doc = r#"```rust"#)]
+#![cfg_attr(not(feature = "std"), doc = r#"```rust,compile_fail"#)]
 //! use asn1_rs::ToDer;
 //!
 //! let mut writer = Vec::new();
@@ -139,32 +134,14 @@
 //!                0x02, 0x03, 0x01, 0x00, 0x00,
 //! ];
 //! assert_eq!(&writer, bytes);
-//! # }
 //! ```
 //!
 //! If the parsing succeeds, but the integer cannot fit into the expected type, the method will return
 //! an `IntegerTooLarge` error.
 //!
-//! # Custom derive attributes
-//!
-//! To simplify the code needed to declare common/usual ASN.1 objects, custom derive attributes are provided.
-//!
-//! For example, to derive a `MyType SEQUENCE { a INTEGER }`, declare a `struct` and add the [`Sequence`](derive@derive::Sequence) attribute:
-//! ```rust
-//! # use asn1_rs::*;
-//! #[derive(Sequence)]
-//! pub struct MyType {
-//!   a: u32,
-//! }
-//! ```
-//!
-//! See [doc::derive] for documentation and examples.
-//!
-#![doc = include_str!("../doc/ASN1.md")]
-//!
 //! ## Changes
 //!
-//! See `CHANGELOG.md`, and `UPGRADING.md` for instructions for upgrading major versions.
+//! See `CHANGELOG.md`.
 //!
 //! # References
 //!
@@ -185,7 +162,6 @@
     // unreachable_pub
 )]
 #![forbid(unsafe_code)]
-#![warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![warn(
 /* missing_docs,
 rust_2018_idioms,*/
@@ -206,9 +182,6 @@ extern crate core;
 // #[cfg(feature = "alloc")]
 extern crate alloc;
 
-mod input;
-pub use input::*;
-
 mod asn1_types;
 mod ber;
 mod class;
@@ -216,39 +189,24 @@ mod datetime;
 mod debug;
 mod derive;
 mod error;
-mod from_ber;
-mod from_der;
 mod header;
 mod length;
 mod tag;
-mod to_ber;
-mod to_der;
 mod tostatic;
 mod traits;
 
 pub use asn1_types::*;
-pub use ber::*;
 pub use class::*;
 pub use datetime::*;
 pub use derive::*;
 pub use error::*;
-pub use from_ber::*;
-pub use from_der::*;
 pub use header::*;
 pub use length::*;
 pub use tag::*;
 pub use traits::*;
 
-#[cfg(feature = "std")]
-pub use {to_ber::*, to_der::*};
-
 pub use nom;
 pub use nom::{Err, IResult, Needed};
-
-pub use bitvec;
-
-#[cfg(feature = "bigint")]
-pub use num_bigint;
 
 #[doc(hidden)]
 pub mod exports {

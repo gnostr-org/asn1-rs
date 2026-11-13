@@ -1,4 +1,6 @@
+use crate::ber::bytes_to_u64;
 use crate::*;
+use core::convert::TryFrom;
 
 /// ASN.1 `ENUMERATED` type
 ///
@@ -14,35 +16,26 @@ impl Enumerated {
     }
 }
 
-impl_tryfrom_any!(Enumerated);
+impl<'a> TryFrom<Any<'a>> for Enumerated {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for Enumerated {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 8.4)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-        // The encoding of an enumerated value shall be that of the integer value with which it is associated.
-        let (rem, res) = <u32>::from_ber_content(header, input)?;
-        Ok((rem, Enumerated(res)))
+    fn try_from(any: Any<'a>) -> Result<Enumerated> {
+        TryFrom::try_from(&any)
     }
 }
 
-impl<'i> DerParser<'i> for Enumerated {
-    type Error = BerError<Input<'i>>;
+impl<'a, 'b> TryFrom<&'b Any<'a>> for Enumerated {
+    type Error = Error;
 
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 8.4)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-        // The encoding of an enumerated value shall be that of the integer value with which it is associated.
-        let (rem, res) = <u32>::from_der_content(header, input)?;
-        Ok((rem, Enumerated(res)))
+    fn try_from(any: &'b Any<'a>) -> Result<Enumerated> {
+        any.tag().assert_eq(Self::TAG)?;
+        any.header.assert_primitive()?;
+        let res_u64 = bytes_to_u64(any.data)?;
+        if res_u64 > (<u32>::MAX as u64) {
+            return Err(Error::IntegerTooLarge);
+        }
+        let value = res_u64 as u32;
+        Ok(Enumerated(value))
     }
 }
 
@@ -60,86 +53,20 @@ impl Tagged for Enumerated {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for Enumerated {
-        type Encoder = Primitive<{ Tag::Enumerated.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            let i = Integer::from(self.0);
-            Length::Definite(i.data.len())
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let i = Integer::from(self.0);
-            target.write_all(&i.data)?;
-            Ok(i.data.len())
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
-        }
+impl ToDer for Enumerated {
+    fn to_der_len(&self) -> Result<usize> {
+        Integer::from(self.0).to_der_len()
     }
 
-    impl_toder_from_tober!(TY Enumerated);
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerParser, DerParser, Enumerated, Input};
-
-    #[test]
-    fn parse_ber_enum() {
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0a0102"));
-        let (rem, res) = <Enumerated>::parse_ber(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(res.0, 2);
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <Enumerated>::parse_ber(input).expect_err("wrong tag");
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let i = Integer::from(self.0);
+        let len = i.data.len();
+        let header = Header::new(Class::Universal, false, Self::TAG, Length::Definite(len));
+        header.write_der_header(writer)
     }
 
-    #[test]
-    fn parse_der_enum() {
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0a0102"));
-        let (rem, res) = <Enumerated>::parse_der(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(res.0, 2);
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <Enumerated>::parse_der(input).expect_err("wrong tag");
-
-        // Fail: non-canonical encoding of integer
-        let input = Input::from_slice(&hex!("0a02ffff"));
-        let _ = <Enumerated>::parse_ber(input).expect_err("non-canonical encoding");
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{Enumerated, ToBer};
-
-        #[test]
-        fn tober_enumerated() {
-            // Ok: Integer
-            let i = Enumerated::new(4);
-            let mut v: Vec<u8> = Vec::new();
-            i.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"0a0104"});
-
-            // Ok: integer with MSB set (must be encoded on 2 bytes)
-            let i = Enumerated::new(0x8f);
-            let mut v: Vec<u8> = Vec::new();
-            i.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"0a02008f"});
-        }
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let int = Integer::from(self.0);
+        int.write_der_content(writer)
     }
 }

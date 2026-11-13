@@ -69,19 +69,6 @@ macro_rules! asn1_string {
                 use alloc::string::ToString;
                 self.data.to_string()
             }
-
-            /// Return a reference to the raw string, if shared
-            ///
-            /// Note: unlike `.as_ref()`, this function can return a reference that can
-            /// outlive the current object (if the raw data does).
-            #[inline]
-            pub fn as_raw_str(&self) -> Option<&'a str> {
-                match self.data {
-                    alloc::borrow::Cow::Borrowed(s) => Some(s),
-                    _ => None,
-                }
-            }
-
         }
 
         impl<'a> AsRef<str> for $name<'a> {
@@ -104,59 +91,27 @@ macro_rules! asn1_string {
             }
         }
 
-        $crate::impl_tryfrom_any!('i @ $name<'i>);
+        impl<'a> core::convert::TryFrom<$crate::Any<'a>> for $name<'a> {
+            type Error = $crate::Error;
 
-        impl<'i> $crate::BerParser<'i> for $name<'i> {
-            type Error = $crate::BerError<$crate::Input<'i>>;
-
-            fn from_ber_content(header: &'_ $crate::Header<'i>, input: $crate::Input<'i>) -> $crate::nom::IResult<$crate::Input<'i>, Self, Self::Error> {
-                use alloc::borrow::Cow;
-                // Encoding shall either be primitive or constructed (X.690: 8.20)
-                let (rem, data) =
-                    if !header.constructed() {
-                        use $crate::nom::Input as _;
-
-                        let (rem, data) = input.take_split(input.len());
-                        (rem, Cow::Borrowed(data.as_bytes2()))
-                    } else {
-                        let (rem, s) = $crate::parse_ber_segmented::<$crate::OctetString>(header, input, $crate::OCTETSTRING_MAX_RECURSION)?;
-
-                        let s = s.into_cow();
-                        (rem, s)
-                    };
-
-                let b = data.as_ref();
-                <$name>::test_valid_charset(b).map_err(|e|
-                    $crate::BerError::nom_err_input(&rem, e.into()))?;
-
-                match data {
-                    Cow::Borrowed(b) => {
-                        let s = alloc::str::from_utf8(b).map_err(|e|
-                            $crate::BerError::nom_err_input(&rem, e.into()))?;
-                        let data = Cow::Borrowed(s);
-                        Ok((rem, $name { data }))
-                    }
-                    Cow::Owned(v) => {
-                        let s = alloc::string::String::from_utf8(v).map_err(|e|
-                            $crate::BerError::nom_err_input(&rem, e.into()))?;
-
-                        let data = Cow::Owned(s);
-                        Ok((rem, $name { data }))
-                    }
-                }
+            fn try_from(any: $crate::Any<'a>) -> $crate::Result<$name<'a>> {
+                use core::convert::TryFrom;
+                TryFrom::try_from(&any)
             }
         }
 
-        impl<'i> $crate::DerParser<'i> for $name<'i> {
-            type Error = $crate::BerError<$crate::Input<'i>>;
+        impl<'a, 'b> core::convert::TryFrom<&'b $crate::Any<'a>> for $name<'a> {
+            type Error = $crate::Error;
 
-            fn from_der_content(header: &'_ $crate::Header<'i>, input: $crate::Input<'i>) -> $crate::nom::IResult<$crate::Input<'i>, Self, Self::Error> {
-                use $crate::BerParser;
+            fn try_from(any: &'b $crate::Any<'a>) -> $crate::Result<$name<'a>> {
+                use $crate::traits::Tagged;
+                use alloc::borrow::Cow;
+                any.tag().assert_eq(Self::TAG)?;
+                <$name>::test_valid_charset(any.data)?;
 
-                // Encoding shall be primitive (X.690: 10.2)
-                header.assert_primitive_input(&input).map_err($crate::nom::Err::Error)?;
-
-                Self::from_ber_content(header, input)
+                let s = alloc::str::from_utf8(any.data)?;
+                let data = Cow::Borrowed(s);
+                Ok($name { data })
             }
         }
 
@@ -174,45 +129,40 @@ macro_rules! asn1_string {
         }
 
         #[cfg(feature = "std")]
-        const _: () = {
-            use std::io::Write;
-
-            impl $crate::ToBer for $name<'_> {
-                type Encoder = $crate::Primitive< { $crate::Tag::$name.0 }>;
-
-                fn ber_content_len(&self) -> $crate::Length {
-                    $crate::Length::Definite(self.data.len())
-                }
-
-                fn ber_write_content<W: Write>(&self, target: &mut W) -> $crate::SerializeResult<usize> {
-                    target.write_all(self.data.as_bytes())?;
-                    Ok(self.data.len())
-                }
-
-                fn ber_tag_info(&self) -> ($crate::Class, bool, $crate::Tag) {
-                    use $crate::Tagged;
-                    (Self::CLASS, false, Self::TAG)
+        impl $crate::ToDer for $name<'_> {
+            fn to_der_len(&self) -> Result<usize> {
+                let sz = self.data.as_bytes().len();
+                if sz < 127 {
+                    // 1 (class+tag) + 1 (length) + len
+                    Ok(2 + sz)
+                } else {
+                    // 1 (class+tag) + n (length) + len
+                    let n = $crate::Length::Definite(sz).to_der_len()?;
+                    Ok(1 + n + sz)
                 }
             }
 
-            impl $crate::ToDer for $name<'_> {
-                type Encoder = $crate::Primitive<{ $crate::Tag::$name.0 }>;
-
-                fn der_content_len(&self) -> $crate::Length {
-                    $crate::Length::Definite(self.data.len())
-                }
-
-                fn der_write_content<W: Write>(&self, target: &mut W) -> $crate::SerializeResult<usize> {
-                    target.write_all(self.data.as_bytes())?;
-                    Ok(self.data.len())
-                }
-
-                fn der_tag_info(&self) -> ($crate::Class, bool, $crate::Tag) {
-                    use $crate::Tagged;
-                    (Self::CLASS, false, Self::TAG)
-                }
+            fn write_der_header(
+                &self,
+                writer: &mut dyn std::io::Write,
+            ) -> $crate::SerializeResult<usize> {
+                use $crate::Tagged;
+                let header = $crate::Header::new(
+                    $crate::Class::Universal,
+                    false,
+                    Self::TAG,
+                    $crate::Length::Definite(self.data.len()),
+                );
+                header.write_der_header(writer).map_err(Into::into)
             }
-        };
+
+            fn write_der_content(
+                &self,
+                writer: &mut dyn std::io::Write,
+            ) -> $crate::SerializeResult<usize> {
+                writer.write(self.data.as_bytes()).map_err(Into::into)
+            }
+        }
     };
     ($name:ident) => {
         asn1_string!(IMPL $name, stringify!($name));

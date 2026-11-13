@@ -1,10 +1,10 @@
-use core::iter::Sum;
+use crate::{DynTagged, Error, Result, Tag};
+#[cfg(feature = "std")]
+use crate::{SerializeResult, ToDer};
 use core::ops;
 
-use crate::{DynTagged, Error, InnerError, Result, Tag};
-
 /// BER Object Length
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Length {
     /// Definite form (X.690 8.1.3.3)
     Definite(usize),
@@ -28,15 +28,6 @@ impl Length {
         }
     }
 
-    /// Get length of primitive object
-    #[inline]
-    pub fn definite_inner(&self) -> Result<usize, InnerError> {
-        match self {
-            Length::Definite(sz) => Ok(*sz),
-            Length::Indefinite => Err(InnerError::IndefiniteLengthUnexpected),
-        }
-    }
-
     /// Return true if length is definite
     #[inline]
     pub const fn is_definite(&self) -> bool {
@@ -49,15 +40,6 @@ impl Length {
         match self {
             Length::Definite(_) => Ok(()),
             Length::Indefinite => Err(Error::IndefiniteLengthUnexpected),
-        }
-    }
-
-    /// Return error if length is not definite
-    #[inline]
-    pub const fn assert_definite_inner(&self) -> Result<(), InnerError> {
-        match self {
-            Length::Definite(_) => Ok(()),
-            Length::Indefinite => Err(InnerError::IndefiniteLengthUnexpected),
         }
     }
 }
@@ -82,16 +64,6 @@ impl ops::Add<Length> for Length {
     }
 }
 
-impl ops::AddAssign<Length> for Length {
-    fn add_assign(&mut self, rhs: Length) {
-        match (*self, rhs) {
-            (Length::Definite(lhs), Length::Definite(r)) => *self = Length::Definite(lhs + r),
-            (Length::Indefinite, _) => (),
-            (_, Length::Indefinite) => *self = rhs,
-        }
-    }
-}
-
 impl ops::Add<usize> for Length {
     type Output = Self;
 
@@ -99,17 +71,6 @@ impl ops::Add<usize> for Length {
         match self {
             Length::Definite(lhs) => Length::Definite(lhs + rhs),
             Length::Indefinite => self,
-        }
-    }
-}
-
-impl ops::Add<Length> for usize {
-    type Output = Length;
-
-    fn add(self, rhs: Length) -> Self::Output {
-        match rhs {
-            Length::Definite(l) => Length::Definite(self + l),
-            Length::Indefinite => rhs,
         }
     }
 }
@@ -123,25 +84,60 @@ impl ops::AddAssign<usize> for Length {
     }
 }
 
-impl Sum<Length> for Length {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Length::Definite(0), |a, b| a + b)
-    }
-}
-
-impl<'a> Sum<&'a Length> for Length {
-    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Length::Definite(0), |a, b| a + *b)
-    }
-}
-
 impl DynTagged for Length {
     fn tag(&self) -> Tag {
         Tag(0)
     }
+}
 
-    fn accept_tag(_: Tag) -> bool {
-        true
+#[cfg(feature = "std")]
+impl ToDer for Length {
+    fn to_der_len(&self) -> Result<usize> {
+        match self {
+            Length::Indefinite => Ok(1),
+            Length::Definite(l) => match l {
+                0..=0x7f => Ok(1),
+                0x80..=0xff => Ok(2),
+                0x100..=0xffff => Ok(3),
+                0x1_0000..=0xffff_ffff => Ok(4),
+                _ => Err(Error::InvalidLength),
+            },
+        }
+    }
+
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        match *self {
+            Length::Indefinite => {
+                let sz = writer.write(&[0b1000_0000])?;
+                Ok(sz)
+            }
+            Length::Definite(l) => {
+                if l <= 127 {
+                    // Short form
+                    let sz = writer.write(&[l as u8])?;
+                    Ok(sz)
+                } else {
+                    // Long form
+                    let b = l.to_be_bytes();
+                    // skip leading zeroes
+                    // we do not have to test for length, l cannot be 0
+                    let mut idx = 0;
+                    while b[idx] == 0 {
+                        idx += 1;
+                    }
+                    let b = &b[idx..];
+                    // first byte: 0x80 + length of length
+                    let b0 = 0x80 | (b.len() as u8);
+                    let sz = writer.write(&[b0])?;
+                    let sz = sz + writer.write(b)?;
+                    Ok(sz)
+                }
+            }
+        }
+    }
+
+    fn write_der_content(&self, _writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        Ok(0)
     }
 }
 

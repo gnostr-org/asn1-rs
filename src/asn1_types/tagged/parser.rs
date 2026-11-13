@@ -75,9 +75,4 @@ impl<TagKind, T, E> DynTagged for TaggedParser<'_, TagKind, T, E> {
     fn tag(&self) -> Tag {
         self.tag()
     }
-
-    fn accept_tag(_: Tag) -> bool {
-        // `TaggedParser` accepts all tags
-        true
-    }
 }

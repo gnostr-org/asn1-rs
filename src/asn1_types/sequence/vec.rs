@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::Debug;
 
-use self::debug::{trace, trace_generic};
+use self::debug::{macros::debug_eprintln, trace, trace_generic};
 
 // // XXX this compiles but requires bound TryFrom :/
 // impl<'a, 'b, T> TryFrom<&'b Any<'a>> for Vec<T>
@@ -53,64 +53,25 @@ where
     type Error = Error;
 
     fn try_from(any: Any<'a>) -> Result<Self> {
-        any.tag().assert_eq(Self::TAG)?;
-        any.header.assert_constructed()?;
-
-        SetIterator::<T, BerMode>::new(any.data.as_bytes2()).collect()
-    }
-}
-
-impl<'i, T> BerParser<'i> for Vec<T>
-where
-    T: BerParser<'i>,
-    <T as BerParser<'i>>::Error: From<BerError<Input<'i>>>,
-{
-    type Error = <T as BerParser<'i>>::Error;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.10.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        // NOTE: we cannot use many0 here, it silently converts Error to Ok
-        // let (rem, v) = many0(cut(T::parse_ber)).parse(input)?;
-
-        if input.is_empty() {
-            return Ok((input, Vec::new()));
-        }
-
-        AnyIterator::<BerMode>::new(input).try_parse_collect::<Vec<_>, T>()
-    }
-}
-
-impl<'i, T> DerParser<'i> for Vec<T>
-where
-    T: DerParser<'i>,
-    <T as DerParser<'i>>::Error: From<BerError<Input<'i>>>,
-{
-    type Error = <T as DerParser<'i>>::Error;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.10.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        // NOTE: we cannot use many0 here, it silently converts Error to Ok
-        // let (rem, v) = many0(cut(T::parse_ber)).parse(input)?;
-
-        if input.is_empty() {
-            return Ok((input, Vec::new()));
-        }
-
-        AnyIterator::<DerMode>::new(input).try_parse_collect::<Vec<_>, T>()
+        trace_generic(
+            core::any::type_name::<Self>(),
+            "T::from(Any)",
+            |any| {
+                any.tag().assert_eq(Self::TAG)?;
+                any.header.assert_constructed()?;
+                let res_items: Result<Vec<T>> =
+                    SetIterator::<T, BerParser>::new(any.data).collect();
+                if res_items.is_err() {
+                    debug_eprintln!(
+                        core::any::type_name::<T>(),
+                        "≠ {}",
+                        "Conversion from Any failed".red()
+                    );
+                }
+                res_items
+            },
+            any,
+        )
     }
 }
 
@@ -121,7 +82,7 @@ where
     fn check_constraints(any: &Any) -> Result<()> {
         any.tag().assert_eq(Self::TAG)?;
         any.header.assert_constructed()?;
-        for item in SequenceIterator::<Any, DerMode>::new(any.data.as_bytes2()) {
+        for item in SequenceIterator::<Any, DerParser>::new(any.data) {
             let item = item?;
             <T as CheckDerConstraints>::check_constraints(&item)?;
         }
@@ -130,7 +91,6 @@ where
 }
 
 impl<T> Tagged for Vec<T> {
-    const CONSTRUCTED: bool = true;
     const TAG: Tag = Tag::Sequence;
 }
 
@@ -157,16 +117,12 @@ where
             core::any::type_name::<Self>(),
             "Sequence::from_der",
             |bytes| {
-                let (rem, any) = trace(
-                    core::any::type_name::<Self>(),
-                    wrap_ber_parser(parse_der_any),
-                    bytes,
-                )
-                .map_err(Err::convert)?;
+                let (rem, any) = trace(core::any::type_name::<Self>(), parse_der_any, bytes)
+                    .map_err(Err::convert)?;
                 any.header
                     .assert_tag(Self::TAG)
                     .map_err(|e| Err::Error(e.into()))?;
-                let v = SequenceIterator::<T, DerMode, E>::new(any.data.as_bytes2())
+                let v = SequenceIterator::<T, DerParser, E>::new(any.data)
                     .collect::<Result<Vec<T>, E>>()
                     .map_err(Err::Error)?;
                 Ok((rem, v))
@@ -177,55 +133,33 @@ where
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    // NOTE: we need T::DynTagged (T can be a CHOICE)
-    impl<T> ToBer for Vec<T>
-    where
-        T: ToBer,
-        T: DynTagged,
-        // Vec<T>: DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn ber_content_len(&self) -> Length {
-            ber_length_constructed_items(self.iter())
+impl<T> ToDer for Vec<T>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        let mut len = 0;
+        for t in self.iter() {
+            len += t.to_der_len()?;
         }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.iter().try_fold(0, |acc, t| {
-                let sz = t.ber_encode(target)?;
-                Ok(acc + sz)
-            })
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+        let header = Header::new(Class::Universal, true, Self::TAG, Length::Definite(len));
+        Ok(header.to_der_len()? + len)
     }
 
-    impl<T> ToDer for Vec<T>
-    where
-        T: ToDer,
-        T: DynTagged,
-        // Vec<T>: DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn der_content_len(&self) -> Length {
-            der_length_constructed_items(self.iter())
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let mut len = 0;
+        for t in self.iter() {
+            len += t.to_der_len().map_err(|_| SerializeError::InvalidLength)?;
         }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.iter().try_fold(0, |acc, t| {
-                let sz = t.der_encode(target)?;
-                Ok(acc + sz)
-            })
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+        let header = Header::new(Class::Universal, true, Self::TAG, Length::Definite(len));
+        header.write_der_header(writer)
     }
-};
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let mut sz = 0;
+        for t in self.iter() {
+            sz += t.write_der(writer)?;
+        }
+        Ok(sz)
+    }
+}

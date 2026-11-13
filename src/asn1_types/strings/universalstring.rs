@@ -7,8 +7,8 @@ use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 use core::iter::FromIterator;
-use nom::Input as _;
 
 /// ASN.1 `UniversalString` type
 ///
@@ -50,36 +50,27 @@ impl From<String> for UniversalString<'_> {
     }
 }
 
-impl_tryfrom_any!('i @ UniversalString<'i>);
+impl<'a> TryFrom<Any<'a>> for UniversalString<'a> {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for UniversalString<'i> {
-    type Error = BerError<Input<'i>>;
+    fn try_from(any: Any<'a>) -> Result<UniversalString<'a>> {
+        TryFrom::try_from(&any)
+    }
+}
 
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall either be primitive or constructed (X.690: 8.20)
-        let (rem, data) = if header.is_constructed() {
-            let (rem, data) = input.take_split(input.len());
-            (rem, Cow::Borrowed(data.as_bytes2()))
-        } else {
-            let (rem, s) =
-                parse_ber_segmented::<OctetString>(header, input, OCTETSTRING_MAX_RECURSION)?;
-            let s = s.into_cow();
-            (rem, s)
-        };
+impl<'a, 'b> TryFrom<&'b Any<'a>> for UniversalString<'a> {
+    type Error = Error;
 
-        if data.len() % 4 != 0 {
-            return Err(BerError::nom_err_input(
-                &rem,
-                InnerError::StringInvalidCharset,
-            ));
+    fn try_from(any: &'b Any<'a>) -> Result<UniversalString<'a>> {
+        any.tag().assert_eq(Self::TAG)?;
+
+        if any.data.len() % 4 != 0 {
+            return Err(Error::StringInvalidCharset);
         }
 
         // read slice as big-endian UCS-4 string
-        let v = data
-            .as_ref()
+        let v = &any
+            .data
             .chunks(4)
             .map(|s| match s {
                 [a, b, c, d] => {
@@ -92,26 +83,12 @@ impl<'i> BerParser<'i> for UniversalString<'i> {
                 _ => unreachable!(),
             })
             .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| BerError::nom_err_input(&rem, InnerError::StringInvalidCharset))?;
+            .ok_or(Error::StringInvalidCharset)?;
 
         let s = String::from_iter(v);
         let data = Cow::Owned(s);
 
-        Ok((rem, UniversalString { data }))
-    }
-}
-
-impl<'i> DerParser<'i> for UniversalString<'i> {
-    type Error = BerError<Input<'i>>;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 10.2)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-
-        Self::from_ber_content(header, input)
+        Ok(UniversalString { data })
     }
 }
 
@@ -129,67 +106,34 @@ impl Tagged for UniversalString<'_> {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for UniversalString<'_> {
-        type Encoder = Primitive<{ Tag::UniversalString.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            // UCS-4: 4 bytes per character
-            let sz = self.data.len() * 4;
-            Length::Definite(sz)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.data
-                .chars()
-                .try_for_each(|c| target.write_all(&(c as u32).to_be_bytes()[..]))?;
-            Ok(self.data.len() * 4)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
+impl ToDer for UniversalString<'_> {
+    fn to_der_len(&self) -> Result<usize> {
+        // UCS-4: 4 bytes per character
+        let sz = self.data.len() * 4;
+        if sz < 127 {
+            // 1 (class+tag) + 1 (length) + len
+            Ok(2 + sz)
+        } else {
+            // 1 (class+tag) + n (length) + len
+            let n = Length::Definite(sz).to_der_len()?;
+            Ok(1 + n + sz)
         }
     }
 
-    impl_toder_from_tober!(LFT 'a, UniversalString<'a>);
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerParser, DerParser, UniversalString};
-
-    #[test]
-    fn parse_ber_universalstring() {
-        let input = &hex!("1C 10 00000061 00000062 00000063 00000064");
-        let (rem, result) = UniversalString::parse_ber(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(result.as_ref(), "abcd");
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let header = Header::new(
+            Class::Universal,
+            false,
+            Self::TAG,
+            Length::Definite(self.data.len() * 4),
+        );
+        header.write_der_header(writer)
     }
 
-    #[test]
-    fn parse_der_universalstring() {
-        let input = &hex!("1C 10 00000061 00000062 00000063 00000064");
-        let (rem, result) = UniversalString::parse_der(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(result.as_ref(), "abcd");
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{ToBer, UniversalString};
-
-        #[test]
-        fn tober_universalstring() {
-            let s = UniversalString::new("abcd");
-            let mut v: Vec<u8> = Vec::new();
-            s.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"1C 10 00000061 00000062 00000063 00000064"});
-        }
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.data
+            .chars()
+            .try_for_each(|c| writer.write(&(c as u32).to_be_bytes()[..]).map(|_| ()))?;
+        Ok(self.data.len() * 4)
     }
 }

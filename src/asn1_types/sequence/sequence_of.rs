@@ -108,45 +108,8 @@ where
         if !any.header.is_constructed() {
             return Err(Error::ConstructExpected);
         }
-        let items = SequenceIterator::<T, BerMode>::new(any.data.as_bytes2())
-            .collect::<Result<Vec<T>>>()?;
+        let items = SequenceIterator::<T, BerParser>::new(any.data).collect::<Result<Vec<T>>>()?;
         Ok(SequenceOf::new(items))
-    }
-}
-
-impl<'i, T> BerParser<'i> for SequenceOf<T>
-where
-    T: BerParser<'i>,
-    <T as BerParser<'i>>::Error: From<BerError<Input<'i>>>,
-{
-    type Error = <T as BerParser<'i>>::Error;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        let (rem, items) = <Vec<T>>::from_ber_content(header, input)?;
-        // NOTE: can't use SequenceIterator, it does not return `rem`
-
-        Ok((rem, SequenceOf::new(items)))
-    }
-}
-
-impl<'i, T> DerParser<'i> for SequenceOf<T>
-where
-    T: DerParser<'i>,
-    <T as DerParser<'i>>::Error: From<BerError<Input<'i>>>,
-{
-    type Error = <T as DerParser<'i>>::Error;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        let (rem, items) = <Vec<T>>::from_der_content(header, input)?;
-        // NOTE: can't use SequenceIterator, it does not return `rem`
-
-        Ok((rem, SequenceOf::new(items)))
     }
 }
 
@@ -157,7 +120,7 @@ where
     fn check_constraints(any: &Any) -> Result<()> {
         any.tag().assert_eq(Self::TAG)?;
         any.header.assert_constructed()?;
-        for item in SequenceIterator::<Any, DerMode>::new(any.data.as_bytes2()) {
+        for item in SequenceIterator::<Any, DerParser>::new(any.data) {
             let item = item?;
             T::check_constraints(&item)?;
         }
@@ -176,16 +139,12 @@ where
             core::any::type_name::<Self>(),
             "SequenceOf::from_der",
             |bytes| {
-                let (rem, any) = trace(
-                    core::any::type_name::<Self>(),
-                    wrap_ber_parser(parse_der_any),
-                    bytes,
-                )
-                .map_err(Err::convert)?;
+                let (rem, any) = trace(core::any::type_name::<Self>(), parse_der_any, bytes)
+                    .map_err(Err::convert)?;
                 any.header
                     .assert_tag(Self::TAG)
                     .map_err(|e| Err::Error(e.into()))?;
-                let items = SequenceIterator::<T, DerMode, E>::new(any.data.as_bytes2())
+                let items = SequenceIterator::<T, DerParser, E>::new(any.data)
                     .collect::<Result<Vec<T>, E>>()
                     .map_err(Err::Error)?;
                 Ok((rem, SequenceOf::new(items)))
@@ -196,58 +155,30 @@ where
 }
 
 impl<T> Tagged for SequenceOf<T> {
-    const CONSTRUCTED: bool = true;
     const TAG: Tag = Tag::Sequence;
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl<T> ToBer for SequenceOf<T>
-    where
-        T: ToBer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn ber_content_len(&self) -> Length {
-            self.items.ber_content_len()
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.items.ber_write_content(target)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+impl<T> ToDer for SequenceOf<T>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        self.items.to_der_len()
     }
 
-    impl<T> ToDer for SequenceOf<T>
-    where
-        T: ToDer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn der_content_len(&self) -> Length {
-            self.items.der_content_len()
-        }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.items.der_write_content(target)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.items.write_der_header(writer)
     }
-};
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.items.write_der_content(writer)
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerParser, Input, SequenceOf};
+    use crate::SequenceOf;
     use core::iter::FromIterator;
 
     /// Test use of object, available methods and syntax for different use cases
@@ -262,28 +193,5 @@ mod tests {
 
         // range operator
         assert_eq!(&set[1..3], &[2, 3]);
-    }
-
-    #[test]
-    fn ber_parser_sequence_of_vec() {
-        // Ok: empty
-        let input = Input::from_slice(&hex!("30 00"));
-        let (rem, result) = <SequenceOf<u32>>::parse_ber(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(result.as_ref().is_empty());
-
-        // Ok: 1 item, correct tag
-        let input = Input::from_slice(&hex!("30 05 0203010001"));
-        let (rem, result) = <SequenceOf<u32>>::parse_ber(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(result.as_ref(), &[65537]);
-
-        // Fail: 2 items, 1 with incorrect tag
-        let input = Input::from_slice(&hex!("30 08 02 03 01 00 01 01 01 ff"));
-        let _ = <SequenceOf<u32>>::parse_ber(input).expect_err("parsing should have failed");
-
-        // Fail: incomplete
-        let input = Input::from_slice(&hex!("30 07 0203010001 0201"));
-        let _ = <SequenceOf<u32>>::parse_ber(input).expect_err("parsing should have failed");
     }
 }

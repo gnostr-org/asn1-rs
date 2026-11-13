@@ -1,4 +1,4 @@
-use crate::{Class, Error, InnerError, Result};
+use crate::{Error, Result};
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 use rusticata_macros::newtype_enum;
@@ -7,7 +7,7 @@ use rusticata_macros::newtype_enum;
 ///
 /// X.690 doesn't specify the maximum tag size so we're assuming that people
 /// aren't going to need anything more than a u32.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tag(pub u32);
 
 newtype_enum! {
@@ -63,17 +63,6 @@ impl Tag {
         }
     }
 
-    pub const fn assert_eq_inner(&self, tag: Tag) -> Result<(), InnerError> {
-        if self.0 == tag.0 {
-            Ok(())
-        } else {
-            Err(InnerError::UnexpectedTag {
-                expected: Some(tag),
-                actual: *self,
-            })
-        }
-    }
-
     pub fn invalid_value(&self, msg: &str) -> Error {
         Error::InvalidValue {
             tag: *self,
@@ -85,66 +74,5 @@ impl Tag {
 impl From<u32> for Tag {
     fn from(v: u32) -> Self {
         Tag(v)
-    }
-}
-
-pub trait Tagged {
-    const CLASS: Class = Class::Universal;
-
-    const CONSTRUCTED: bool = false;
-
-    const TAG: Tag;
-}
-
-impl<T> Tagged for &'_ T
-where
-    T: Tagged,
-{
-    const CLASS: Class = T::CLASS;
-    const CONSTRUCTED: bool = T::CONSTRUCTED;
-    const TAG: Tag = T::TAG;
-}
-
-/// Common trait for all tagged objects
-pub trait DynTagged {
-    /// Return the class of the object
-    fn class(&self) -> Class {
-        Class::Universal
-    }
-
-    /// Return `true` if the object is constructed
-    fn constructed(&self) -> bool {
-        false
-    }
-
-    /// Return the tag number of the object
-    fn tag(&self) -> Tag;
-
-    /// Return true if the tag number is acceptable for this object
-    ///
-    /// For most types, this is a static test (`tag == Self::TAG`). Examples of exceptions:
-    /// - type `Any` (accepts all tag numbers)
-    /// - ASN.1 type `CHOICE` (accept multiple tags)
-    fn accept_tag(tag: Tag) -> bool;
-}
-
-impl<T> DynTagged for T
-where
-    T: Tagged,
-{
-    fn class(&self) -> Class {
-        T::CLASS
-    }
-
-    fn constructed(&self) -> bool {
-        T::CONSTRUCTED
-    }
-
-    fn tag(&self) -> Tag {
-        T::TAG
-    }
-
-    fn accept_tag(tag: Tag) -> bool {
-        tag == T::TAG
     }
 }

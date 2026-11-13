@@ -1,10 +1,10 @@
 #![cfg(feature = "std")]
+#![allow(dead_code)]
 
 use std::borrow::Cow;
 
 use asn1_rs::*;
 
-#[allow(dead_code)]
 #[derive(DerSequence, Debug, PartialEq)]
 struct Person {
     name: String,

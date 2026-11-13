@@ -9,6 +9,3 @@ pub mod derive {}
 
 #[doc = include_str!("../../doc/DEBUG.md")]
 pub mod debug {}
-
-#[doc = include_str!("../../doc/ASN1.md")]
-pub mod asn1 {}

@@ -1,6 +1,6 @@
 use crate::*;
+use core::convert::TryFrom;
 use core::fmt;
-use nom::Input as _;
 #[cfg(feature = "datetime")]
 use time::OffsetDateTime;
 
@@ -130,63 +130,28 @@ impl UtcTime {
     }
 }
 
-impl_tryfrom_any!(UtcTime);
+impl<'a> TryFrom<Any<'a>> for UtcTime {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for UtcTime {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // UtcTime is encoded as a VisibleString (X.680: 43.3) and can be constructed
-        // TODO: constructed UtcTime not supported
-        if header.is_constructed() {
-            return Err(BerError::nom_err_input(&input, InnerError::Unsupported));
-        }
-
-        fn is_visible(b: u8) -> bool {
-            (0x20..=0x7f).contains(&b)
-        }
-        if !input.iter_elements().all(is_visible) {
-            return Err(BerError::nom_err_input(
-                &input,
-                InnerError::StringInvalidCharset,
-            ));
-        }
-
-        let (rem, data) = input.take_split(input.len());
-        let time = UtcTime::from_bytes(data.as_bytes2())
-            .map_err(|e| BerError::nom_err_input(&data, e.into()))?;
-        Ok((rem, time))
+    fn try_from(any: Any<'a>) -> Result<UtcTime> {
+        TryFrom::try_from(&any)
     }
 }
 
-impl<'i> DerParser<'i> for UtcTime {
-    type Error = BerError<Input<'i>>;
+impl<'a, 'b> TryFrom<&'b Any<'a>> for UtcTime {
+    type Error = Error;
 
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 10.2)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-
-        fn is_visible(b: u8) -> bool {
-            (0x20..=0x7f).contains(&b)
+    fn try_from(any: &'b Any<'a>) -> Result<UtcTime> {
+        any.tag().assert_eq(Self::TAG)?;
+        #[allow(clippy::trivially_copy_pass_by_ref)]
+        fn is_visible(b: &u8) -> bool {
+            0x20 <= *b && *b <= 0x7f
         }
-        if !input.iter_elements().all(is_visible) {
-            return Err(BerError::nom_err_input(
-                &input,
-                InnerError::StringInvalidCharset,
-            ));
+        if !any.data.iter().all(is_visible) {
+            return Err(Error::StringInvalidCharset);
         }
 
-        let (rem, data) = input.take_split(input.len());
-
-        let time = UtcTime::from_bytes(data.as_bytes2())
-            .map_err(|e| BerError::nom_err_input(&data, e.into()))?;
-        Ok((rem, time))
+        UtcTime::from_bytes(any.data)
     }
 }
 
@@ -224,104 +189,33 @@ impl Tagged for UtcTime {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for UtcTime {
-        type Encoder = Primitive<{ Tag::UtcTime.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            // data:
-            // - 6 bytes for YYMMDD
-            // - 6 for hhmmss in DER (X.690 section 11.8.2)
-            // - 1 for the character Z in DER (X.690 section 11.8.1)
-            // data length: 13
-            Length::Definite(13)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            write!(
-                target,
-                "{:02}{:02}{:02}{:02}{:02}{:02}Z",
-                self.0.year, self.0.month, self.0.day, self.0.hour, self.0.minute, self.0.second,
-            )?;
-            // write_fmt returns (), see above for length value
-            Ok(13)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
-        }
+impl ToDer for UtcTime {
+    fn to_der_len(&self) -> Result<usize> {
+        // data:
+        // - 6 bytes for YYMMDD
+        // - 6 for hhmmss in DER (X.690 section 11.8.2)
+        // - 1 for the character Z in DER (X.690 section 11.8.1)
+        // data length: 13
+        //
+        // thus, length will always be on 1 byte (short length) and
+        // class+structure+tag also on 1
+        //
+        // total: 15 = 1 (class+constructed+tag) + 1 (length) + 13
+        Ok(15)
     }
 
-    impl_toder_from_tober!(TY UtcTime);
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{DerParser, Input, UtcTime};
-
-    #[test]
-    fn parse_der_utctime() {
-        let input = &hex!("17 0D 30 32 31 32 31 33 31 34 32 39 32 33 5A FF");
-        let (rem, result) = UtcTime::parse_der(Input::from(input)).expect("parsing failed");
-        assert_eq!(rem.as_bytes2(), &[0xff]);
-        #[cfg(feature = "datetime")]
-        {
-            use time::macros::datetime;
-            let datetime = datetime! {2-12-13 14:29:23 UTC};
-
-            assert_eq!(result.utc_datetime(), Ok(datetime));
-        }
-        #[cfg(feature = "std")]
-        let _ = result.to_string();
-        let _ = result;
-        //
-        let input = &hex!("17 11 30 32 31 32 31 33 31 34 32 39 32 33 2b 30 33 30 30 FF");
-        let (rem, result) = UtcTime::parse_der(Input::from(input)).expect("parsing failed");
-        assert_eq!(rem.as_bytes2(), &[0xff]);
-        #[cfg(feature = "datetime")]
-        {
-            use time::macros::datetime;
-            let datetime = datetime! {2-12-13 14:29:23 +03:00};
-
-            assert_eq!(result.utc_datetime(), Ok(datetime));
-        }
-        #[cfg(feature = "std")]
-        let _ = result.to_string();
-        let _ = result;
-        //
-        let input = &hex!("17 11 30 32 31 32 31 33 31 34 32 39 32 33 2d 30 33 30 30 FF");
-        let (rem, result) = UtcTime::parse_der(Input::from(input)).expect("parsing failed");
-        assert_eq!(rem.as_bytes2(), &[0xff]);
-        #[cfg(feature = "datetime")]
-        {
-            use time::macros::datetime;
-            let datetime = datetime! {2-12-13 14:29:23 -03:00};
-
-            assert_eq!(result.utc_datetime(), Ok(datetime));
-        }
-        #[cfg(feature = "std")]
-        let _ = result.to_string();
-        let _ = result;
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        // see above for length value
+        writer.write(&[Self::TAG.0 as u8, 13]).map_err(Into::into)
     }
 
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{ASN1DateTime, ToBer, UtcTime};
-
-        #[test]
-        fn tober_utctime() {
-            let datetime = ASN1DateTime::new(13, 12, 2, 14, 29, 23, None, crate::ASN1TimeZone::Z);
-            let time = UtcTime::new(datetime);
-            let mut v: Vec<u8> = Vec::new();
-            time.ber_encode(&mut v).expect("serialization failed");
-            let expected = &[&hex!("17 0d") as &[u8], b"131202142923Z"].concat();
-            assert_eq!(&v, expected);
-        }
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        write!(
+            writer,
+            "{:02}{:02}{:02}{:02}{:02}{:02}Z",
+            self.0.year, self.0.month, self.0.day, self.0.hour, self.0.minute, self.0.second,
+        )?;
+        // write_fmt returns (), see above for length value
+        Ok(13)
     }
 }

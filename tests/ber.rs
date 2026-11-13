@@ -19,25 +19,88 @@ fn from_ber_bitstring() {
     // correct DER encoding
     //
     let input = &hex!("03 04 06 6e 5d c0");
-    let (rem, b) = BitString::from_ber(input).expect("parsing failed");
+    let (rem, result) = BitString::from_ber(input).expect("parsing failed");
     assert!(rem.is_empty());
-    // compare bitvector length to bitstring bytes, minus ignored bits
-    assert_eq!(b.len(), input[3..].len() * 8 - usize::from(input[2]));
-
+    assert_eq!(result.unused_bits, 6);
+    assert_eq!(&result.data[..], &input[3..]);
     //
     // correct encoding, but wrong padding bits (not all set to 0)
     //
     let input = &hex!("03 04 06 6e 5d e0");
-    let (rem, b) = BitString::from_ber(input).expect("parsing failed");
+    let (rem, result) = BitString::from_ber(input).expect("parsing failed");
     assert!(rem.is_empty());
-    assert_eq!(b.len(), input[3..].len() * 8 - usize::from(input[2]));
+    assert_eq!(result.unused_bits, 6);
+    assert_eq!(&result.data[..], &input[3..]);
     //
     // long form of length (invalid, < 127)
     //
     let input = &hex!("03 81 04 06 6e 5d c0");
-    let (rem, b) = BitString::from_ber(input).expect("parsing failed");
+    let (rem, result) = BitString::from_ber(input).expect("parsing failed");
     assert!(rem.is_empty());
-    assert_eq!(b.len(), input[4..].len() * 8 - usize::from(input[3]));
+    assert_eq!(result.unused_bits, 6);
+    assert_eq!(&result.data[..], &input[4..]);
+}
+
+#[test]
+fn from_ber_embedded_pdv() {
+    let input = &hex!("2b 0d a0 07 81 05 2a 03 04 05 06 82 02 aa a0");
+    let (rem, result) = EmbeddedPdv::from_ber(input).expect("parsing failed");
+    assert_eq!(rem, &[]);
+    assert_eq!(
+        result.identification,
+        PdvIdentification::Syntax(Oid::from(&[1, 2, 3, 4, 5, 6]).unwrap())
+    );
+    assert_eq!(result.data_value, &[0xaa, 0xa0]);
+}
+
+#[test]
+fn embedded_pdv_variants() {
+    // identification: syntaxes
+    let input = &hex!("2b 11 a0 0c a0 0a 80 02  2a 03 81 04 2a 03 04 05   82 01 00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(
+        res.identification,
+        PdvIdentification::Syntaxes { .. }
+    ));
+    // identification: syntax
+    let input = &hex!("2b 09 a0 04 81 02 2a 03  82 01 00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(res.identification, PdvIdentification::Syntax(_)));
+    // identification: presentation-context-id
+    let input = &hex!("2b 08 a0 03 82 01 02 82  01 00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(
+        res.identification,
+        PdvIdentification::PresentationContextId(_)
+    ));
+    // identification: context-negotiation
+    let input = &hex!("2b 10 a0 0b a3 09 80 01  2a 81 04 2a 03 04 05 82   01 00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(
+        res.identification,
+        PdvIdentification::ContextNegotiation { .. }
+    ));
+    // identification: transfer-syntax
+    let input = &hex!("2b 0b a0 06 84 04 2a 03  04 05 82 01 00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(
+        res.identification,
+        PdvIdentification::TransferSyntax(_)
+    ));
+    // identification: fixed
+    let input = &hex!("2b 07 a0 02 85 00 82 01  00");
+    let (rem, res) = EmbeddedPdv::from_ber(input).expect("parsing EMBEDDED PDV failed");
+    assert!(rem.is_empty());
+    assert!(matches!(res.identification, PdvIdentification::Fixed));
+    // identification: invalid
+    let input = &hex!("2b 07 a0 02 86 00 82 01  00");
+    let e = EmbeddedPdv::from_ber(input).expect_err("parsing should fail");
+    assert!(matches!(e, Err::Error(Error::InvalidValue { .. })));
 }
 
 #[test]
@@ -149,18 +212,7 @@ fn from_ber_length_invalid() {
     let input = &hex!("02 ff 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10");
     let res = u8::from_ber(input).expect_err("parsing should have failed");
     assert_eq!(res, nom::Err::Error(Error::InvalidLength));
-
     let input = &hex!("02 85 ff ff ff ff ff 00");
-    let res = u8::from_ber(input).expect_err("parsing should have failed");
-    // length is 5 bytes long, so on platforms where usize::BITS < 5*8 the error will not be
-    // Incomplete but InvalidLength
-    // This is not important, what matters is the 'expect_err' (parsing should fail in both cases)
-    if usize::BITS > 40 {
-        assert!(res.is_incomplete());
-    }
-
-    // incomplete
-    let input = &hex!("02 04 00");
     let res = u8::from_ber(input).expect_err("parsing should have failed");
     assert!(res.is_incomplete());
 }

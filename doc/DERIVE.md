@@ -1,39 +1,38 @@
 # BER/DER Custom Derive Attributes
 
-## BER/DER Sequence
+## BER/DER Sequence parsers
 
-### `Sequence`
+### `BER`
 
-To derive parsers and encoders for a BER `SEQUENCE` object, add the [`Sequence`] derive attribute to an existing struct. All fields must implement
-- [`BerParser`] and [`DerParser`] traits for parsing,
-- [`ToBer`] and [`ToDer`] traits for encoding.
-
-By default, all traits are generated (+ [`DynTagged`]).
-
-The [`asn1`](#asn1-attribute) attribute can be used to control which parsers and encoders are generated.
+To derive a BER `SEQUENCE` parser, add the [`BerSequence`] derive attribute to an existing struct. Parsers will be derived automatically for all fields, which must implement the [`FromBer`] trait.
 
 For ex:
 
 ```rust
 # use asn1_rs::*;
-#[derive(Debug, PartialEq, Sequence)]
+#[derive(Debug, PartialEq, BerSequence)]
 pub struct S {
     a: u32,
     b: u16,
     c: u16,
 }
 
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-let (rem, result) = S::parse_ber(input)?;
-# Ok((rem, ())) };
+# let parser = |input| -> Result<(), Error> {
+let (rest, result) = S::from_ber(input)?;
+# Ok(()) };
 ```
 
-After parsing `input`, any bytes that were leftover and not used to fill val will be returned in `rem`.
+After parsing b, any bytes that were leftover and not used to fill val will be returned in `rest`.
 
 When parsing a `SEQUENCE` into a struct, any trailing elements of the `SEQUENCE` that do
-not have matching fields in val will not be included in `rem`, as these are considered
+not have matching fields in val will not be included in `rest`, as these are considered
 valid elements of the `SEQUENCE` and not trailing data.
 
+### `DER`
+
+To derive a `DER` parser, use the [`DerSequence`] custom attribute.
+
+*Note: the `DerSequence` attributes derive both `BER` and `DER` parsers.*
 
 ## Tagged values
 
@@ -192,11 +191,26 @@ let (rem, result) = S::from_ber(input)?;
 
 Limitations are the same as for `OPTIONAL` attribute.
 
-## BER/DER Set
+## Debugging
 
-Deriving code for BER/DER `SET` objects is very similar to `SEQUENCE`. Use the [`Set`] custom derive attribute on the structure, and everything else is exactly the same as for sequences (see above for documentation).
+To help debugging the generated code, the `#[debug_derive]` attribute has been added.
 
-The [`asn1`](#asn1-attribute) attribute can be used to control which parsers and encoders are generated.
+When this attribute is specified, the generated code will be printed to `stderr` during compilation.
+
+Example:
+```rust
+use asn1_rs::*;
+
+#[derive(BerSequence)]
+#[debug_derive]
+struct S {
+  a: u32,
+}
+```
+
+## BER/DER Set parsers
+
+Parsing BER/DER `SET` objects is very similar to `SEQUENCE`. Use the [`BerSet`] and [`DerSet`] custom derive attributes on the structure, and everything else is exactly the same as for sequences (see above for documentation).
 
 Example:
 ```rust
@@ -204,13 +218,13 @@ Example:
 use std::collections::BTreeSet;
 
 // `Ord` is needed because we will parse as a `BTreeSet` later
-#[derive(Debug, Set, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, DerSet, PartialEq, Eq, PartialOrd, Ord)]
 pub struct S2 {
     a: u16,
 }
 
 // test with EXPLICIT Vec
-#[derive(Debug, PartialEq, Set)]
+#[derive(Debug, PartialEq, DerSet)]
 pub struct S {
     // a INTEGER
     a: u32,
@@ -220,207 +234,100 @@ pub struct S {
     c: TaggedExplicit<BTreeSet<S2>, Error, 0>,
 }
 
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-let (rem, result) = S::parse_ber(input)?;
+# let parser = |input| -> Result<(), Error> {
+let (rem, result) = S::from_ber(input)?;
 
 // Get a reference on c (type is &BTreeSet<S2>)
 let ref_c = result.c.as_ref();
-# Ok((rem, ())) };
+# Ok(()) };
 ```
 
-_Note: The `Sequence` and `Set` attributes cannot be used at the same time on a struct._
+# Advanced
+
+## Custom errors
+
+Derived parsers can use the `error` attribute to specify the error type of the parser.
+
+The custom error type must implement `From<Error>`, so the derived parsers will transparently convert errors using the [`Into`] trait.
 
 
-# `CHOICE`
-
-The `Choice` derive attribute is used to derive code for an `enum` representing a `CHOICE` object.
-Each field represent a possible value.
-
-For convenience, 3 kinds of derive can be generated:
-- default ("Untagged"): each variant represent an ASN.1 type
-- tagged explicit: each variant represent a type encoded as TAGGED EXPLICIT, with a tag number auto-generated (incremental number of order of appearance of the variant)
-- tagged explicit: similar, but with TAGGED IMPLICIT
-
-For the tagged kinds, the `tag` attribute can be used to specify the tag number of a variant.
-In that case, the automatic counter is updated to continue from that value (see examples below).
-If the same tag number happens multiple times, an error is raised.
-
-The [`asn1`](#asn1-attribute) attribute can be used to control which parsers and encoders are generated.
-
-### Examples
-
-Default (untagged) `CHOICE`:
+Example:
 ```rust
 # use asn1_rs::*;
-/// MessageType ::= CHOICE
-#[derive(Debug, PartialEq, Choice)]
-pub enum MessageType<'a> {
-    /// text OCTET STRING
-    Text(&'a [u8]),
-    /// codedNumeric INTEGER
-    CodedNumeric(u32),
-}
-
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-let (rem, result) = MessageType::parse_ber(input)?;
-# Ok((rem, ())) };
-```
-
-`CHOICE` with TAGGED EXPLICIT variants only (using `tagged_explicit` attribute):
-```rust
-# use asn1_rs::*;
-/// Test ::= CHOICE
-#[derive(Debug, PartialEq, Choice)]
-#[tagged_explicit]
-pub enum Test {
-    /// age [0] INTEGER
-    Age(u32),
-    /// index [1] INTEGER
-    Index(u32),
-}
 #
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-# let (rem, result) = Test::parse_ber(input)?;
-# Ok((rem, ())) };
+#[derive(Debug, PartialEq)]
+pub enum MyError {
+    NotYetImplemented,
+}
+
+impl From<asn1_rs::Error> for MyError {
+    fn from(_: asn1_rs::Error) -> Self {
+        MyError::NotYetImplemented
+    }
+}
+
+#[derive(DerSequence)]
+#[error(MyError)]
+pub struct T2 {
+    pub a: u32,
+}
 ```
 
-`CHOICE` with TAGGED EXPLICIT variants only (using `tagged_explicit` attribute) and specific tags:
+## Mapping errors
+
+Sometimes, it is necessary to map the returned error to another type, for example when a subparser returns a different error type than the parser's, and the [`Into`] trait cannot be implemented. This is often used in combination with the `error` attribute, but can also be used alone.
+
+The `map_err` attribute can be used to specify a function or closure to map errors. The function signature is `fn (e1: E1) -> E2`.
+
+Example:
 ```rust
 # use asn1_rs::*;
-/// Test ::= CHOICE
-#[derive(Debug, PartialEq, Choice)]
-#[tagged_explicit]
-pub enum Test {
-    /// name [0] UTF8String
-    Name(String),
-    /// surname [4] UTF8String
-    #[tag(4)]
-    Surname(String),
-    // since above variant used `tag(4)`, current tag will be 5
-    // to override this, use the `tag` attribute again
-    /// lastname [5] UTF8String
-    LastName(String),
-}
 #
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-# let (rem, result) = Test::parse_ber(input)?;
-# Ok((rem, ())) };
-```
-
-`CHOICE` with TAGGED IMPLICIT variants only (using `tagged_implicit` attribute):
-```rust
-# use asn1_rs::*;
-/// GeneralName ::= CHOICE
-#[derive(Debug, PartialEq, Choice)]
-#[tagged_implicit]
-pub enum GeneralName<'a> {
-    /// otherName [0]  AnotherName
-    OtherName(Any<'a>),
-    /// rfc822Name [1] IA5String
-    Rfc822Name(Ia5String<'a>),
-     /// dNSName [2] IA5String
-    DNSName(Ia5String<'a>),
-    // ...
-}
-#
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-# let (rem, result) = GeneralName::parse_ber(input)?;
-# Ok((rem, ())) };
-```
-
-# `ENUMERATED`
-
-The `Enumerated` derive attribute is used to derive code for an `enum` representing an `ENUMERATED` object.
-Each field represent a possible value.
-
-The `enum` must implement the following:
-- all variants must represent an integer value (either using `#repr(<uint_type>)` on the `enum`, or `Variant = <uint>` on fields)
-- the `enum` must implement `Clone` and `Copy`
-
-The [`asn1`](#asn1-attribute) attribute can be used to control which parsers and encoders are generated.
-
-### Examples
-
-```rust
-# use asn1_rs::{BerParser, BerError, Enumerated, Input, nom::IResult};
- #[derive(Debug, Clone, Copy)]
-// NOTE: enum must have an integer representation + Clone + Copy
-#[derive(Enumerated)]
-pub enum MyEnum {
-    Zero = 0,
-    Four = 4,
-    Five,
+#[derive(Debug, PartialEq)]
+pub enum MyError {
+    NotYetImplemented,
 }
 
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-let (rem, result) = MyEnum::parse_ber(input)?;
-# Ok((rem, ())) };
-```
+impl From<asn1_rs::Error> for MyError {
+    fn from(_: asn1_rs::Error) -> Self {
+        MyError::NotYetImplemented
+    }
+}
 
+#[derive(DerSequence)]
+#[error(MyError)]
+pub struct T2 {
+    pub a: u32,
+}
 
-
-# Type Alias
-
-The [`Alias`] derive attribute is used to derive code for an ASN.1 type alias.
-It can only be used on a struct with a single anonymous field.
-
-The [`asn1`](#asn1-attribute) attribute can be used to control which parsers and encoders are generated.
-
-### Examples
-
-```rust
-# use asn1_rs::*;
-/// KeyIdentifier ::= OCTET STRING
-#[derive(Debug, PartialEq, Alias)]
-pub struct KeyIdentifier<'a>(&'a [u8]);
-
-# let parser = |input| -> IResult<Input, (), BerError<Input>> {
-let (rem, result) = KeyIdentifier::parse_ber(input)?;
-# Ok((rem, ())) };
-```
-
-# `asn1` attribute
-
-### Restricting generated parsers and encoders
-
-To control generated code (for ex generate only a `DER` parser), use the `parse` or `encode` items
-of the `asn1` attribute.
-
-Each meta item is a string containing a comma-separated list of ASN.1 kinds (`BER` or `DER`)
-- if the meta item is absent, it defaults to `"BER,DER"`
-- if the meta item is present, code is generated only for the given ASN.1 kinds
-- if the meta item is present and empty, no code is generated
-
-| `asn1` meta item | Set of Possible Values | Examples |
-| ----- | ----- | ----- |
-| `parse` | `""`, `"BER"`, `"DER"` | `#asn1(parse="")`<br />`#asn1(parse="BER")`<br />`#asn1(parse="BER,DER")` |
-| `encode` | `""`, `"BER"`, `"DER"` | `#asn1(encode="")`<br />`#asn1(encode="BER")`<br />`#asn1(encode="BER,DER")` |
-
-To generate only the `BER` parser, and no encoder:
-```rust
-# use asn1_rs::*;
-#[derive(Debug, PartialEq, Sequence)]
-#[asn1(parse="BER", encode="")]
-pub struct S {
-    a: u32,
-    b: u16,
-    c: u16,
+// subparser returns an error of type MyError,
+// which is mapped to `Error`
+#[derive(DerSequence)]
+pub struct T4 {
+    #[map_err(|_| Error::BerTypeError)]
+    pub a: T2,
 }
 ```
 
+*Note*: when deriving BER and DER parsers, errors paths are different (`TryFrom` returns the error type, while [`FromDer`] returns a [`ParseResult`]). Some code will be inserted by the `map_err` attribute to handle this transparently and keep the same function signature.
 
 # Serialization
 
-## BER/DER objects serialization
+## BER/DER Sequence serialization
 
-The [`Sequence`], [`Set`], [`Choice`] and [`Alias`] derive attributes derive parsers and encoders by default, for BER and DER (this can be controlled using the `asn1` attribute).
+To serialize a struct to a DER `SEQUENCE`, add the [`ToDerSequence`] derive attribute to an existing struct.
+Serialization will be derived automatically for all fields, which must implement the [`ToDer`] trait.
 
-All struct fields must implement the related traits.
+Some parser traits may be required, so also deriving parsers using [`DerSequence`] may be required.
 
-DER serialization example:
+*Note*: serialization to BER is currently not available. In most cases, DER serialization should be enough.
+
+
+For ex:
+
 ```rust
 # use asn1_rs::*;
-#[derive(Debug, PartialEq, Sequence)]
+#[derive(Debug, PartialEq, DerSequence, ToDerSequence)]
 pub struct S {
     a: u32,
     b: u16,
@@ -429,189 +336,18 @@ pub struct S {
 
 let s = S { a: 1, b: 2, c: 3 };
 let output = s.to_der_vec().expect("serialization failed");
-let (_rest, result) = S::parse_ber(Input::from(&output)).expect("parsing failed");
+let (_rest, result) = S::from_ber(&output).expect("parsing failed");
 assert_eq!(s, result);
 ```
 
-
-# Advanced
-
-## Debugging
-
-To help debugging the generated code, the `#[debug_derive]` attribute can been added to any derive
-attribute.
-
-When this attribute is specified, the generated code will be printed to `stderr` during compilation.
-It is used to inspect the generated code (which also be copy/pasted into a rust file).
-
-Example:
-```rust
-use asn1_rs::*;
-
-#[derive(Sequence)]
-#[debug_derive]
-struct S {
-  a: u32,
-}
-```
-
-## Custom errors (parsers)
-
-Derived parsers can use the `error` attribute to specify the error type of the parser.
-
-The custom error type must implement the following traits, so the derived parsers will transparently convert errors using the [`Into`] trait:
-- `From<` [`BerError`] `<Input>>`: convert from errors for primitive/default `asn1_rs` types
-- [`ParseError`](crate::nom::error::ParseError) (`nom` type): common trait for `nom` errors
-- `Display`: required to implement `core::error::Error`
-
-
-
-Example:
-```rust
-# use asn1_rs::*;
-# use core::fmt;
-#
-#[derive(Debug, PartialEq)]
-pub enum MyError {
-    NotYetImplemented,
-}
-
-impl fmt::Display for MyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        f.write_str("Not Yet Implemented")
-    }
-}
-
-impl From<BerError<Input<'_>>> for MyError {
-    fn from(_: BerError<Input>) -> Self {
-        MyError::NotYetImplemented
-    }
-}
-
-impl nom::error::ParseError<Input<'_>> for MyError {
-    fn from_error_kind(_: Input, _: nom::error::ErrorKind) -> Self {
-        MyError::NotYetImplemented
-    }
-    fn append(_: Input, _: nom::error::ErrorKind, _: Self) -> Self {
-        MyError::NotYetImplemented
-    }
-}
-
-#[derive(Sequence)]
-#[error(MyError)]
-pub struct T2 {
-    pub a: u32,
-}
-```
-
-## Mapping errors (parsers)
-
-Sometimes, it is necessary to map the returned error to another type, for example when a subparser returns a different error type than the parser's, and the [`Into`] trait cannot be implemented. This is often used in combination with the `error` attribute, but can also be used alone.
-
-The `map_err` attribute can be used to specify a function or closure to map errors. The function signature is `fn (e1: E1) -> E2` with `E1` the parser error type, `E2` the struct parser error type.
-
-Example:
-```rust
-# use asn1_rs::*;
-#
-// Here we simply map the error to 'Unsupported'
-fn map_to_unsupported(e: BerError<Input>) -> BerError<Input> {
-    BerError::new(e.input().clone(), InnerError::Unsupported)
-}
-
-#[derive(Sequence)]
-pub struct T4 {
-    #[map_err(map_to_unsupported)]
-    pub a: u32,
-}
-```
-
-*Note*: when deriving BER and DER parsers, errors paths are different (`TryFrom` returns the error type, while [`FromDer`] returns a [`ParseResult`]). Some code will be inserted by the `map_err` attribute to handle this transparently and keep the same function signature.
-
-## Custom parsers
-
-When deriving a `Sequence` or `Set`, parsers for struct fields can be specified using the `asn1(parse="")` attribute. When specified, this attribute must contain a closure or a function name that will be used to
-parse data instead of the default derived parsers.
-
-The custom parser will receive current `input` object, and must return a `IResult<Input, T, BerError<Input>>` object that will be either stored into the field (if `Ok`) or returned (if `Err`).
-
-### Examples (custom parsers)
-
-Custom parsing function, using closure:
-```rust
-# use asn1_rs::*;
-#[derive(Sequence)]
-pub struct AAParseClosure {
-    // ignore input and return a hardcoded value
-    #[asn1(parse = "|input| Ok((input, 0xff))")]
-    a: u32,
-}
-```
-
-Custom parsing function, using function:
-```rust
-# use asn1_rs::*;
-# use nom::IResult;
-fn parse_val(input: Input) -> IResult<Input, u32, BerError<Input>> {
-    eprintln!("input: {input}");
-    Ok((input, 0))
-}
-//
-#[derive(Debug, PartialEq, Sequence)]
-pub struct StructWithAttr {
-    #[asn1(parse = "parse_val")]
-    a: u32,
-}
-```
-
-### Accessing initial object content
-
-To access a reference to the object's initial input (the entire sequence/set content) using a custom parser,
-the object (not the field) must be marked using `asn1("orig_input")`. The original input will be stored in
-a variable named `orig_input` and can be accessed in the custom parser (_only for closures_).
-
-Note that the sequence header is always available as `header` (even if not using `orig_input`) for closures.
-
-Example:
-```rust
-# use asn1_rs::*;
-#[derive(Debug, PartialEq, Sequence)]
-#[asn1(parse = "DER", encode = "", orig_input)]
-pub struct StructKeepInputRef<'a> {
-    a: u32,
-    // Keep a reference to the sequence's original content
-    #[asn1(parse = "|input| Ok((input, orig_input))")]
-    orig_input: Input<'a>,
-}
-```
-
-
-# Deprecated attributes
-
-The following attributes are becoming deprecated, and will be marked `deprecated` in the next release.
-
-NOTE: they are not yet marked as such to leave some time for transition, and ensure every feature has been ported to the new attributes.
-
-- [`BerParserSet`](crate::BerParserSet), [`DerParserSet`](crate::DerParserSet), [`ToBerSet`](crate::ToBerSet): replace by `Set`
-- [`BerParserSequence`](crate::BerParserSequence), [`DerParserSequence`](crate::DerParserSequence), [`ToBerSequence`](crate::ToBerSequence): replace by `Sequence`
-
-[`DynTagged`]: crate::DynTagged
-[`Sequence`]: crate::derive::Sequence
-[`Set`]: crate::derive::Set
-[`Choice`]: crate::derive::Choice
-[`Alias`]: crate::derive::Alias
-[`BerParser`]: crate::BerParser
-[`DerParser`]: crate::DerParser
 [`FromBer`]: crate::FromBer
 [`FromDer`]: crate::FromDer
-[`ToBer`]: crate::ToBer
 [`ToDer`]: crate::ToDer
 [`BerSequence`]: crate::BerSequence
 [`DerSequence`]: crate::DerSequence
 [`BerSet`]: crate::BerSet
 [`DerSet`]: crate::DerSet
 [`ToDerSequence`]: crate::ToDerSequence
-[`BerError`]: crate::BerError
 [`ParseResult`]: crate::ParseResult
 [`TaggedExplicit`]: crate::TaggedExplicit
 [`TaggedImplicit`]: crate::TaggedImplicit

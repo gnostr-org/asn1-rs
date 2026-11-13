@@ -1,8 +1,5 @@
-use nom::{number::streaming::be_u8, AsBytes};
-
 use crate::*;
-
-//---- Boolean
+use core::convert::TryFrom;
 
 /// ASN.1 `BOOLEAN` type
 ///
@@ -33,48 +30,33 @@ impl Boolean {
     }
 }
 
-impl_tryfrom_any!(Boolean);
+impl<'a> TryFrom<Any<'a>> for Boolean {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for Boolean {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 8.2.1)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-        // The contents octets shall consist of a single octet (X.690: 8.2.1)
-        if header.length != Length::Definite(1) {
-            return Err(BerError::nom_err(input, InnerError::InvalidLength));
-        }
-        let (rem, value) = be_u8(input)?;
-        Ok((rem, Boolean { value }))
+    fn try_from(any: Any<'a>) -> Result<Boolean> {
+        TryFrom::try_from(&any)
     }
 }
 
-impl<'i> DerParser<'i> for Boolean {
-    type Error = BerError<Input<'i>>;
+// non-consuming version
+impl<'a, 'b> TryFrom<&'b Any<'a>> for Boolean {
+    type Error = Error;
 
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        let (rem, b) = Boolean::from_ber_content(header, input)?;
-        if !(b.value == 0 || b.value == 0xff) {
-            let e = DerConstraint::InvalidBoolean;
-            return Err(BerError::nom_err_input(
-                &rem,
-                InnerError::DerConstraintFailed(e),
-            ));
+    fn try_from(any: &'b Any<'a>) -> Result<Boolean> {
+        any.tag().assert_eq(Self::TAG)?;
+        // X.690 section 8.2.1:
+        // The encoding of a boolean value shall be primitive. The contents octets shall consist of a single octet
+        if any.header.length != Length::Definite(1) {
+            return Err(Error::InvalidLength);
         }
-        Ok((rem, b))
+        let value = any.data[0];
+        Ok(Boolean { value })
     }
 }
 
 impl CheckDerConstraints for Boolean {
     fn check_constraints(any: &Any) -> Result<()> {
-        let c = any.data.as_bytes()[0];
+        let c = any.data[0];
         // X.690 section 11.1
         if !(c == 0 || c == 0xff) {
             return Err(Error::DerConstraintFailed(DerConstraint::InvalidBoolean));
@@ -90,79 +72,54 @@ impl Tagged for Boolean {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for Boolean {
-        type Encoder = Primitive<{ Tag::Boolean.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            Length::Definite(1)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            target.write_all(&[self.value])?;
-            Ok(1)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), self.constructed(), self.tag())
-        }
+impl ToDer for Boolean {
+    fn to_der_len(&self) -> Result<usize> {
+        // 3 = 1 (tag) + 1 (length) + 1 (value)
+        Ok(3)
     }
 
-    impl ToDer for Boolean {
-        type Encoder = Primitive<{ Tag::Boolean.0 }>;
-
-        fn der_content_len(&self) -> Length {
-            Length::Definite(1)
-        }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let value = if self.value != 0 { 0xff } else { 0x00 };
-            target.write_all(&[value])?;
-            Ok(1)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), self.constructed(), self.tag())
-        }
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        writer.write(&[Self::TAG.0 as u8, 0x01]).map_err(Into::into)
     }
-};
 
-//---- bool
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let b = if self.value != 0 { 0xff } else { 0x00 };
+        writer.write(&[b]).map_err(Into::into)
+    }
 
-impl_tryfrom_any!(bool);
+    /// Similar to using `to_der`, but uses header without computing length value
+    fn write_der_raw(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let sz = writer.write(&[Self::TAG.0 as u8, 0x01, self.value])?;
+        Ok(sz)
+    }
+}
+
+impl<'a> TryFrom<Any<'a>> for bool {
+    type Error = Error;
+
+    fn try_from(any: Any<'a>) -> Result<bool> {
+        TryFrom::try_from(&any)
+    }
+}
+
+impl<'a, 'b> TryFrom<&'b Any<'a>> for bool {
+    type Error = Error;
+
+    fn try_from(any: &'b Any<'a>) -> Result<bool> {
+        any.tag().assert_eq(Self::TAG)?;
+        let b = Boolean::try_from(any)?;
+        Ok(b.bool())
+    }
+}
 
 impl CheckDerConstraints for bool {
     fn check_constraints(any: &Any) -> Result<()> {
-        let c = any.data.as_bytes()[0];
+        let c = any.data[0];
         // X.690 section 11.1
         if !(c == 0 || c == 0xff) {
             return Err(Error::DerConstraintFailed(DerConstraint::InvalidBoolean));
         }
         Ok(())
-    }
-}
-
-impl<'i> BerParser<'i> for bool {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        <Boolean>::from_ber_content(header, input).map(|(rem, b)| (rem, b.bool()))
-    }
-}
-
-impl<'i> DerParser<'i> for bool {
-    type Error = BerError<Input<'i>>;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        <Boolean>::from_der_content(header, input).map(|(rem, b)| (rem, b.bool()))
     }
 }
 
@@ -173,144 +130,18 @@ impl Tagged for bool {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for bool {
-        type Encoder = Primitive<{ Tag::Boolean.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            Length::Definite(1)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let value = if *self { 0xff } else { 0x00 };
-            target.write_all(&[value])?;
-            Ok(1)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
-        }
+impl ToDer for bool {
+    fn to_der_len(&self) -> Result<usize> {
+        // 3 = 1 (tag) + 1 (length) + 1 (value)
+        Ok(3)
     }
 
-    impl ToDer for bool {
-        type Encoder = Primitive<{ Tag::Boolean.0 }>;
-
-        fn der_content_len(&self) -> Length {
-            Length::Definite(1)
-        }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let value = if *self { 0xff } else { 0x00 };
-            target.write_all(&[value])?;
-            Ok(1)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), self.constructed(), self.tag())
-        }
-    }
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerParser, Boolean, DerParser, Input};
-
-    #[test]
-    fn parse_ber_bool() {
-        //--- Boolean
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0101ff"));
-        let (rem, res) = <Boolean>::parse_ber(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res.bool());
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <Boolean>::parse_ber(input).expect_err("wrong tag");
-
-        // Fail: content with invalid length
-        let input = Input::from_slice(&hex!("0102ffff"));
-        let _ = <Boolean>::parse_ber(input).expect_err("invalid length");
-
-        //--- bool
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0101ff"));
-        let (rem, res) = <bool>::parse_ber(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res);
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <bool>::parse_ber(input).expect_err("wrong tag");
-
-        // Fail: content with invalid length
-        let input = Input::from_slice(&hex!("0102ffff"));
-        let _ = <bool>::parse_ber(input).expect_err("invalid length");
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        writer.write(&[Self::TAG.0 as u8, 0x01]).map_err(Into::into)
     }
 
-    #[test]
-    fn parse_der_bool() {
-        //--- Boolean
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0101ff"));
-        let (rem, res) = <Boolean>::parse_der(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res.bool());
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <Boolean>::parse_der(input).expect_err("wrong tag");
-
-        // Fail: content with invalid length
-        let input = Input::from_slice(&hex!("0102ffff"));
-        let _ = <Boolean>::parse_der(input).expect_err("invalid length");
-
-        // Fail: non-canonical boolean
-        let input = Input::from_slice(&hex!("010101"));
-        let _ = <Boolean>::parse_der(input).expect_err("non-canonical");
-
-        //--- bool
-        // Ok: expected data
-        let input = Input::from_slice(&hex!("0101ff"));
-        let (rem, res) = <bool>::parse_der(input).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res);
-
-        // Fail: wrong tag
-        let input = Input::from_slice(&hex!("0400"));
-        let _ = <bool>::parse_der(input).expect_err("wrong tag");
-
-        // Fail: content with invalid length
-        let input = Input::from_slice(&hex!("0102ffff"));
-        let _ = <bool>::parse_der(input).expect_err("invalid length");
-
-        // Fail: non-canonical boolean
-        let input = Input::from_slice(&hex!("010101"));
-        let _ = <bool>::parse_der(input).expect_err("non-canonical");
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{Boolean, ToBer};
-
-        #[test]
-        fn tober_bool() {
-            // Ok: Boolean
-            let b = Boolean::TRUE;
-            let mut v: Vec<u8> = Vec::new();
-            b.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"0101ff"});
-
-            // Ok: bool
-            let mut v: Vec<u8> = Vec::new();
-            true.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"0101ff"});
-        }
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let b = if *self { 0xff } else { 0x00 };
+        writer.write(&[b]).map_err(Into::into)
     }
 }

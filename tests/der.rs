@@ -1,7 +1,7 @@
 use asn1_rs::*;
 use hex_literal::hex;
 use nom::sequence::pair;
-use nom::{Needed, Parser};
+use nom::Needed;
 use std::collections::BTreeSet;
 use std::convert::TryInto;
 
@@ -34,10 +34,10 @@ fn from_der_bitstring() {
     // correct DER encoding
     //
     let input = &hex!("03 04 06 6e 5d c0");
-    let (rem, b) = BitString::from_der(input).expect("parsing failed");
+    let (rem, result) = BitString::from_der(input).expect("parsing failed");
     assert!(rem.is_empty());
-    // compare bitvector length to bitstring bytes, minus ignored bits
-    assert_eq!(b.len(), input[3..].len() * 8 - usize::from(input[2]));
+    assert_eq!(result.unused_bits, 6);
+    assert_eq!(&result.data[..], &input[3..]);
     //
     // correct encoding, but wrong padding bits (not all set to 0)
     //
@@ -101,6 +101,18 @@ fn from_der_bool() {
     let (rem, result) = <bool>::from_der(input).expect("parsing failed");
     assert!(rem.is_empty());
     assert!(!result);
+}
+
+#[test]
+fn from_der_embedded_pdv() {
+    let input = &hex!("2b 0d a0 07 81 05 2a 03 04 05 06 82 02 aa a0");
+    let (rem, result) = EmbeddedPdv::from_der(input).expect("parsing failed");
+    assert_eq!(rem, &[]);
+    assert_eq!(
+        result.identification,
+        PdvIdentification::Syntax(Oid::from(&[1, 2, 3, 4, 5, 6]).unwrap())
+    );
+    assert_eq!(result.data_value, &[0xaa, 0xa0]);
 }
 
 #[test]
@@ -613,19 +625,16 @@ fn from_der_tagged_implicit_all() {
         .expect("parsing failed");
 
     // test TagParser API
-    let mut parser = TaggedParserBuilder::implicit()
+    let parser = TaggedParserBuilder::implicit()
         .with_class(Class::ContextSpecific)
         .with_tag(Tag(1))
         .der_parser::<Ia5String>();
-    let _ = parser.parse(input).expect("parsing failed");
+    let _ = parser(input).expect("parsing failed");
 
     // try specifying the expected tag (correct tag)
-    let _ = parse_der_tagged_implicit::<_, Ia5String, _>(1)
-        .parse(input)
-        .expect("parsing failed");
+    let _ = parse_der_tagged_implicit::<_, Ia5String, _>(1)(input).expect("parsing failed");
     // try specifying the expected tag (incorrect tag)
-    let _ = parse_der_tagged_implicit::<_, Ia5String, _>(2)
-        .parse(input)
+    let _ = parse_der_tagged_implicit::<_, Ia5String, _>(2)(input)
         .expect_err("parsing should have failed");
 }
 
@@ -648,5 +657,5 @@ fn from_der_tagged_optional_cov() {
     assert!(r.is_err());
 
     let p = OptTaggedParser::from(Tag(1));
-    let _ = format!("{p:?}");
+    let _ = format!("{:?}", p);
 }

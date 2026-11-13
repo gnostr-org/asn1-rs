@@ -7,7 +7,6 @@ use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use nom::Input as _;
 
 /// ASN.1 `BMPSTRING` type
 ///
@@ -50,29 +49,15 @@ impl From<String> for BmpString<'_> {
     }
 }
 
-impl_tryfrom_any!('i @ BmpString<'i>);
+impl<'a, 'r> core::convert::TryFrom<&'r Any<'a>> for BmpString<'a> {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for BmpString<'i> {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall either be primitive or constructed (X.690: 8.20)
-        let (rem, data) = if header.is_constructed() {
-            let (rem, data) = input.take_split(input.len());
-            (rem, Cow::Borrowed(data.as_bytes2()))
-        } else {
-            let (rem, s) =
-                parse_ber_segmented::<OctetString>(header, input, OCTETSTRING_MAX_RECURSION)?;
-            let s = s.into_cow();
-            (rem, s)
-        };
+    fn try_from(any: &'r Any<'a>) -> Result<BmpString<'a>> {
+        any.tag().assert_eq(Self::TAG)?;
 
         // read slice as big-endian UTF-16 string
-        let v = data
-            .as_ref()
+        let v = &any
+            .data
             .chunks(2)
             .map(|s| match s {
                 [a, b] => ((*a as u16) << 8) | (*b as u16),
@@ -81,25 +66,19 @@ impl<'i> BerParser<'i> for BmpString<'i> {
             })
             .collect::<Vec<_>>();
 
-        let s = String::from_utf16(&v)
-            .map_err(|_| BerError::nom_err_input(&rem, InnerError::StringInvalidCharset))?;
+        let s = String::from_utf16(v)?;
         let data = Cow::Owned(s);
 
-        Ok((rem, BmpString { data }))
+        Ok(BmpString { data })
     }
 }
 
-impl<'i> DerParser<'i> for BmpString<'i> {
-    type Error = BerError<Input<'i>>;
+impl<'a> core::convert::TryFrom<Any<'a>> for BmpString<'a> {
+    type Error = Error;
 
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 10.2)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-
-        Self::from_ber_content(header, input)
+    #[inline]
+    fn try_from(any: Any<'a>) -> Result<BmpString<'a>> {
+        BmpString::try_from(&any)
     }
 }
 
@@ -132,72 +111,33 @@ impl TestValidCharset for BmpString<'_> {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for BmpString<'_> {
-        type Encoder = Primitive<{ Tag::BmpString.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            // compute the UTF-16 length
-            let sz = self.data.encode_utf16().count() * 2;
-            Length::Definite(sz)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let mut v = Vec::new();
-            for u in self.data.encode_utf16() {
-                v.push((u >> 8) as u8);
-                v.push((u & 0xff) as u8);
-            }
-            target.write_all(&v)?;
-            Ok(v.len())
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
+impl ToDer for BmpString<'_> {
+    fn to_der_len(&self) -> Result<usize> {
+        // compute the UTF-16 length
+        let sz = self.data.encode_utf16().count() * 2;
+        if sz < 127 {
+            // 1 (class+tag) + 1 (length) + len
+            Ok(2 + sz)
+        } else {
+            // 1 (class+tag) + n (length) + len
+            let n = Length::Definite(sz).to_der_len()?;
+            Ok(1 + n + sz)
         }
     }
 
-    impl_toder_from_tober!(LFT 'a, BmpString<'a>);
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerParser, BmpString, DerParser};
-
-    #[test]
-    fn parse_ber_bmpstring() {
-        // taken from https://docs.microsoft.com/en-us/windows/win32/seccertenroll/about-bmpstring
-        let input = &hex!("1e 08 00 55 00 73 00 65 00 72");
-        let (rem, result) = BmpString::parse_ber(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(result.as_ref(), "User");
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        // compute the UTF-16 length
+        let l = self.data.encode_utf16().count() * 2;
+        let header = Header::new(Class::Universal, false, Self::TAG, Length::Definite(l));
+        header.write_der_header(writer)
     }
 
-    #[test]
-    fn parse_der_bmpstring() {
-        // taken from https://docs.microsoft.com/en-us/windows/win32/seccertenroll/about-bmpstring
-        let input = &hex!("1e 08 00 55 00 73 00 65 00 72");
-        let (rem, result) = BmpString::parse_der(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(result.as_ref(), "User");
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{BmpString, ToBer};
-
-        #[test]
-        fn tober_bmpstring() {
-            let s = BmpString::new("User");
-            let mut v: Vec<u8> = Vec::new();
-            s.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"1e 08 0055 0073 0065 0072"});
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let mut v = Vec::new();
+        for u in self.data.encode_utf16() {
+            v.push((u >> 8) as u8);
+            v.push((u & 0xff) as u8);
         }
+        writer.write(&v).map_err(Into::into)
     }
 }

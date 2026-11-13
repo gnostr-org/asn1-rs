@@ -5,7 +5,6 @@ use core::{convert::TryFrom, fmt::Debug};
 use self::debug::{trace, trace_generic};
 
 impl<T> Tagged for BTreeSet<T> {
-    const CONSTRUCTED: bool = true;
     const TAG: Tag = Tag::Set;
 }
 
@@ -23,52 +22,12 @@ where
             |any| {
                 any.tag().assert_eq(Self::TAG)?;
                 any.header.assert_constructed()?;
-                let items = SetIterator::<T, BerMode>::new(any.data.as_bytes2())
-                    .collect::<Result<BTreeSet<T>>>()?;
+                let items =
+                    SetIterator::<T, BerParser>::new(any.data).collect::<Result<BTreeSet<T>>>()?;
                 Ok(items)
             },
             any,
         )
-    }
-}
-
-impl<'a, T> BerParser<'a> for BTreeSet<T>
-where
-    T: BerParser<'a>,
-    T: Ord,
-{
-    type Error = <T as BerParser<'a>>::Error;
-
-    fn from_ber_content(
-        header: &'_ Header<'a>,
-        input: Input<'a>,
-    ) -> IResult<Input<'a>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.12.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        AnyIterator::<BerMode>::new(input).try_parse_collect::<Self, T>()
-    }
-}
-
-impl<'a, T> DerParser<'a> for BTreeSet<T>
-where
-    T: DerParser<'a>,
-    T: Ord,
-{
-    type Error = <T as DerParser<'a>>::Error;
-
-    fn from_der_content(
-        header: &'_ Header<'a>,
-        input: Input<'a>,
-    ) -> IResult<Input<'a>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.12.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        AnyIterator::<DerMode>::new(input).try_parse_collect::<Self, T>()
     }
 }
 
@@ -79,7 +38,7 @@ where
     fn check_constraints(any: &Any) -> Result<()> {
         any.tag().assert_eq(Self::TAG)?;
         any.header.assert_constructed()?;
-        for item in SetIterator::<Any, DerMode>::new(any.data.as_bytes2()) {
+        for item in SetIterator::<Any, DerParser>::new(any.data) {
             let item = item?;
             T::check_constraints(&item)?;
         }
@@ -107,7 +66,7 @@ where
                 any.header
                     .assert_constructed()
                     .map_err(|e| Err::Error(e.into()))?;
-                let items = SetIterator::<T, DerMode, E>::new(any.data.as_bytes2())
+                let items = SetIterator::<T, DerParser, E>::new(any.data)
                     .collect::<Result<BTreeSet<T>, E>>()
                     .map_err(Err::Error)?;
                 Ok((rem, items))
@@ -118,62 +77,43 @@ where
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl<T> ToBer for BTreeSet<T>
-    where
-        T: ToBer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn ber_content_len(&self) -> Length {
-            ber_length_constructed_items(self.iter())
+impl<T> ToDer for BTreeSet<T>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        let mut len = 0;
+        for t in self.iter() {
+            len += t.to_der_len()?;
         }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.iter().try_fold(0, |acc, t| {
-                let sz = t.ber_encode(target)?;
-                Ok(acc + sz)
-            })
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+        let header = Header::new(Class::Universal, true, Self::TAG, Length::Definite(len));
+        Ok(header.to_der_len()? + len)
     }
 
-    impl<T> ToDer for BTreeSet<T>
-    where
-        T: ToDer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn der_content_len(&self) -> Length {
-            der_length_constructed_items(self.iter())
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let mut len = 0;
+        for t in self.iter() {
+            len += t.to_der_len().map_err(|_| SerializeError::InvalidLength)?;
         }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.iter().try_fold(0, |acc, t| {
-                let sz = t.der_encode(target)?;
-                Ok(acc + sz)
-            })
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+        let header = Header::new(Class::Universal, true, Self::TAG, Length::Definite(len));
+        header.write_der_header(writer)
     }
-};
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let mut sz = 0;
+        for t in self.iter() {
+            sz += t.write_der(writer)?;
+        }
+        Ok(sz)
+    }
+}
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use crate::*;
     use core::convert::TryFrom;
     use hex_literal::hex;
-    use nom::IResult;
     use std::collections::BTreeSet;
-
-    use crate::{Any, CheckDerConstraints, Error, FromBer, FromDer, Length, SetOf, ToDer};
 
     #[test]
     fn ber_btreeset() {
@@ -194,7 +134,7 @@ mod tests {
 
         assert_eq!(h.len(), 2);
 
-        assert_eq!(h.der_content_len(), Length::Definite(6));
+        assert_eq!(h.to_der_len(), Ok(8));
         let v = h.to_der_vec().expect("could not serialize");
         let (_, h2) = SetOf::<u32>::from_der(&v).unwrap();
         assert!(h.iter().eq(h2.iter()));

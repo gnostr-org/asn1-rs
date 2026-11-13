@@ -108,51 +108,8 @@ where
         if !any.header.is_constructed() {
             return Err(Error::ConstructExpected);
         }
-        let items =
-            SetIterator::<T, BerMode>::new(any.data.as_bytes2()).collect::<Result<Vec<T>>>()?;
+        let items = SetIterator::<T, BerParser>::new(any.data).collect::<Result<Vec<T>>>()?;
         Ok(SetOf::new(items))
-    }
-}
-
-impl<'a, T> BerParser<'a> for SetOf<T>
-where
-    T: BerParser<'a>,
-{
-    type Error = <T as BerParser<'a>>::Error;
-
-    fn from_ber_content(
-        header: &'_ Header<'a>,
-        input: Input<'a>,
-    ) -> IResult<Input<'a>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.12.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        let (rem, items) = AnyIterator::<BerMode>::new(input).try_parse_collect::<Vec<_>, T>()?;
-
-        Ok((rem, SetOf::new(items)))
-    }
-}
-
-impl<'a, T> DerParser<'a> for SetOf<T>
-where
-    T: DerParser<'a>,
-{
-    type Error = <T as DerParser<'a>>::Error;
-
-    fn from_der_content(
-        header: &'_ Header<'a>,
-        input: Input<'a>,
-    ) -> IResult<Input<'a>, Self, Self::Error> {
-        // Encoding shall be constructed (X.690: 8.12.1)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        let (rem, items) = AnyIterator::<DerMode>::new(input).try_parse_collect::<Vec<_>, T>()?;
-
-        Ok((rem, SetOf::new(items)))
     }
 }
 
@@ -163,7 +120,7 @@ where
     fn check_constraints(any: &Any) -> Result<()> {
         any.tag().assert_eq(Self::TAG)?;
         any.header.assert_constructed()?;
-        for item in SetIterator::<Any, DerMode>::new(any.data.as_bytes2()) {
+        for item in SetIterator::<Any, DerParser>::new(any.data) {
             let item = item?;
             T::check_constraints(&item)?;
         }
@@ -187,7 +144,7 @@ where
                 any.header
                     .assert_tag(Self::TAG)
                     .map_err(|e| Err::Error(e.into()))?;
-                let items = SetIterator::<T, DerMode, E>::new(any.data.as_bytes2())
+                let items = SetIterator::<T, DerParser, E>::new(any.data)
                     .collect::<Result<Vec<T>, E>>()
                     .map_err(Err::Error)?;
                 Ok((rem, SetOf::new(items)))
@@ -202,44 +159,25 @@ impl<T> Tagged for SetOf<T> {
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl<T> ToBer for SetOf<T>
-    where
-        T: ToBer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn ber_content_len(&self) -> Length {
-            self.items.ber_content_len()
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.items.ber_write_content(target)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+impl<T> ToDer for SetOf<T>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        self.items.to_der_len()
     }
 
-    impl<T> ToDer for SetOf<T>
-    where
-        T: ToDer + DynTagged,
-    {
-        type Encoder = Constructed;
-
-        fn der_content_len(&self) -> Length {
-            self.items.der_content_len()
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        // Do not call self.items.write_der_header(), this will encode the wrong tag (items is a Vec)
+        let mut len = 0;
+        for t in self.items.iter() {
+            len += t.to_der_len().map_err(|_| SerializeError::InvalidLength)?;
         }
-
-        fn der_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.items.der_write_content(target)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+        let header = Header::new(Class::Universal, true, Self::TAG, Length::Definite(len));
+        header.write_der_header(writer)
     }
-};
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.items.write_der_content(writer)
+    }
+}

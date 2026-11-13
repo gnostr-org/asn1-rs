@@ -2,12 +2,6 @@ use crate::*;
 use core::convert::TryFrom;
 use core::marker::PhantomData;
 
-impl<T, E, const CLASS: u8, const TAG: u32> Tagged for TaggedValue<T, E, Explicit, CLASS, TAG> {
-    const CLASS: Class = Class::new_unwrap(CLASS);
-    const CONSTRUCTED: bool = true;
-    const TAG: Tag = Tag(TAG);
-}
-
 impl<'a, T, E, const CLASS: u8, const TAG: u32> TryFrom<Any<'a>>
     for TaggedValue<T, E, Explicit, CLASS, TAG>
 where
@@ -36,98 +30,12 @@ where
             let class = Class::try_from(CLASS).ok();
             return Err(Error::unexpected_class(class, any.class()).into());
         }
-        let (_, inner) = match T::from_ber(any.data.as_bytes2()) {
+        let (_, inner) = match T::from_ber(any.data) {
             Ok((rem, res)) => (rem, res),
             Err(Err::Error(e)) | Err(Err::Failure(e)) => return Err(e),
             Err(Err::Incomplete(n)) => return Err(Error::Incomplete(n).into()),
         };
         Ok(TaggedValue::explicit(inner))
-    }
-}
-
-impl<'i, T, E, const CLASS: u8, const TAG: u32> BerParser<'i>
-    for TaggedValue<T, E, Explicit, CLASS, TAG>
-where
-    // T: Tagged,
-    T: BerParser<'i>,
-    // E: ParseError<Input<'a>> + From<BerError<Input<'a>>>,
-{
-    type Error = T::Error;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Tagged Explicit must be constructed (X.690 8.14.2)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        // assert class
-        if header.class as u8 != CLASS {
-            // Safety: CLASS < 4
-            let class = Class::try_from(CLASS).unwrap_or(Class::Private);
-            return Err(Err::Error(
-                BerError::unexpected_class(input, Some(class), header.class).into(),
-            ));
-        }
-
-        // note: we check tag here, because the only way to have a different tag
-        // would be to be IMPLICIT, and we already know we are EXPLICIT
-        // This is an exception!
-        if !Self::accept_tag(header.tag) {
-            return Err(Err::Error(
-                BerError::unexpected_tag(input, Some(TAG.into()), header.tag).into(),
-            ));
-        }
-        // calling `parse_ber` will read a new header and parse object `T``
-        // this will also check that T::TAG is expected
-        let (rem, t) = T::parse_ber(input)?;
-        let tagged = TaggedValue::explicit(t);
-        Ok((rem, tagged))
-    }
-}
-
-impl<'i, T, E, const CLASS: u8, const TAG: u32> DerParser<'i>
-    for TaggedValue<T, E, Explicit, CLASS, TAG>
-where
-    // T: Tagged,
-    T: DerParser<'i>,
-    // E: ParseError<Input<'a>> + From<BerError<Input<'a>>>,
-{
-    type Error = T::Error;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Tagged Explicit must be constructed (X.690 8.14.2)
-        header
-            .assert_constructed_input(&input)
-            .map_err(|e| Err::Error(e.into()))?;
-
-        // assert class
-        if header.class as u8 != CLASS {
-            // Safety: CLASS < 4
-            let class = Class::try_from(CLASS).unwrap_or(Class::Private);
-            return Err(Err::Error(
-                BerError::unexpected_class(input, Some(class), header.class).into(),
-            ));
-        }
-
-        // note: we check tag here, because the only way to have a different tag
-        // would be to be IMPLICIT, and we already know we are EXPLICIT
-        // This is an exception!
-        if !Self::accept_tag(header.tag) {
-            return Err(Err::Error(
-                BerError::unexpected_tag(input, Some(TAG.into()), header.tag).into(),
-            ));
-        }
-        // calling `parse_ber` will read a new header and parse object `T``
-        // this will also check that T::TAG is expected
-        let (rem, t) = T::parse_der(input)?;
-        let tagged = TaggedValue::explicit(t);
-        Ok((rem, tagged))
     }
 }
 
@@ -151,7 +59,7 @@ where
                 Error::unexpected_class(class, any.class()).into(),
             ));
         }
-        let (_, inner) = T::from_der(any.data.as_bytes2())?;
+        let (_, inner) = T::from_der(any.data)?;
         Ok((rem, TaggedValue::explicit(inner)))
     }
 }
@@ -163,58 +71,41 @@ where
 {
     fn check_constraints(any: &Any) -> Result<()> {
         any.header.length.assert_definite()?;
-        let (_, inner) = Any::from_ber(any.data.as_bytes2())?;
+        let (_, inner) = Any::from_ber(any.data)?;
         T::check_constraints(&inner)?;
         Ok(())
     }
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    impl<T, E, const CLASS: u8, const TAG: u32> ToBer for TaggedValue<T, E, Explicit, CLASS, TAG>
-    where
-        T: ToBer,
-        T: DynTagged,
-    {
-        type Encoder = BerGenericEncoder;
-
-        fn ber_content_len(&self) -> Length {
-            let content_len = self.inner.ber_content_len();
-            let header_len = ber_header_length(self.inner.tag(), content_len).unwrap_or(0);
-            header_len + content_len
-        }
-
-        fn ber_write_content<W: std::io::Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.inner.ber_encode(target)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
+impl<T, E, const CLASS: u8, const TAG: u32> ToDer for TaggedValue<T, E, Explicit, CLASS, TAG>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        let sz = self.inner.to_der_len()?;
+        if sz < 127 {
+            // 1 (class+tag) + 1 (length) + len
+            Ok(2 + sz)
+        } else {
+            // 1 (class+tag) + n (length) + len
+            let n = Length::Definite(sz).to_der_len()?;
+            Ok(1 + n + sz)
         }
     }
 
-    impl<T, E, const CLASS: u8, const TAG: u32> ToDer for TaggedValue<T, E, Explicit, CLASS, TAG>
-    where
-        T: ToDer,
-        T: DynTagged,
-    {
-        type Encoder = BerGenericEncoder;
-
-        fn der_content_len(&self) -> Length {
-            let content_len = self.inner.der_content_len();
-            let header_len = ber_header_length(self.inner.tag(), content_len).unwrap_or(0);
-            header_len + content_len
-        }
-
-        fn der_write_content<W: std::io::Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.inner.der_encode(target)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, true, Self::TAG)
-        }
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let inner_len = self.inner.to_der_len()?;
+        let class =
+            Class::try_from(CLASS).map_err(|_| SerializeError::InvalidClass { class: CLASS })?;
+        let header = Header::new(class, true, self.tag(), Length::Definite(inner_len));
+        header.write_der_header(writer)
     }
-};
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.inner.write_der(writer)
+    }
+}
 
 /// A helper object to parse `[ n ] EXPLICIT T`
 ///
@@ -300,7 +191,7 @@ where
     fn from_ber(bytes: &'a [u8]) -> ParseResult<'a, Self, E> {
         let (rem, any) = Any::from_ber(bytes).map_err(Err::convert)?;
         let header = any.header;
-        let (_, inner) = T::from_ber(any.data.as_bytes2())?;
+        let (_, inner) = T::from_ber(any.data)?;
         let tagged = TaggedParser {
             header,
             inner,
@@ -319,7 +210,7 @@ where
     fn from_der(bytes: &'a [u8]) -> ParseResult<'a, Self, E> {
         let (rem, any) = Any::from_der(bytes).map_err(Err::convert)?;
         let header = any.header;
-        let (_, inner) = T::from_der(any.data.as_bytes2())?;
+        let (_, inner) = T::from_der(any.data)?;
         let tagged = TaggedParser {
             header,
             inner,
@@ -336,150 +227,36 @@ where
 {
     fn check_constraints(any: &Any) -> Result<()> {
         any.header.length.assert_definite()?;
-        let (_, inner_any) = Any::from_der(any.data.as_bytes2())?;
+        let (_, inner_any) = Any::from_der(any.data)?;
         T::check_constraints(&inner_any)?;
         Ok(())
     }
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    impl<T, E> ToBer for TaggedParser<'_, Explicit, T, E>
-    where
-        T: ToBer,
-    {
-        type Encoder = BerGenericEncoder;
-
-        fn ber_content_len(&self) -> Length {
-            self.inner.ber_total_len()
-        }
-
-        fn ber_write_content<W: std::io::Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.inner.ber_encode(target)
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), true, self.tag())
+impl<T> ToDer for TaggedParser<'_, Explicit, T>
+where
+    T: ToDer,
+{
+    fn to_der_len(&self) -> Result<usize> {
+        let sz = self.inner.to_der_len()?;
+        if sz < 127 {
+            // 1 (class+tag) + 1 (length) + len
+            Ok(2 + sz)
+        } else {
+            // 1 (class+tag) + n (length) + len
+            let n = Length::Definite(sz).to_der_len()?;
+            Ok(1 + n + sz)
         }
     }
 
-    impl<T, E> ToDer for TaggedParser<'_, Explicit, T, E>
-    where
-        T: ToDer,
-    {
-        type Encoder = BerGenericEncoder;
-
-        fn der_content_len(&self) -> Length {
-            self.inner.der_total_len()
-        }
-
-        fn der_write_content<W: std::io::Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            self.inner.der_encode(target)
-        }
-
-        fn der_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), true, self.tag())
-        }
-    }
-};
-
-#[cfg(test)]
-mod tests {
-    use hex_literal::hex;
-
-    use crate::{BerError, BerParser, Input, TaggedExplicit};
-
-    #[test]
-    fn check_tagged_explicit() {
-        type T<'a> = TaggedExplicit<bool, BerError<Input<'a>>, 0>;
-
-        // untagged value -> should fail
-        let input: &[u8] = &hex! {"0101ff"};
-        let _res = T::parse_ber(input.into()).expect_err("parsing should have failed");
-
-        // tagged value, correct tag -> Ok
-        let input: &[u8] = &hex! {"a0 03 0101ff"};
-        let _res = T::parse_ber(input.into()).expect("parsing failed");
-
-        // tagged value, incorrect tag -> Fail
-        let input: &[u8] = &hex! {"a1 03 0101ff"};
-        let _res = T::parse_ber(input.into()).expect_err("parsing should have failed");
-
-        // tagged value, correct tag but incorrect class -> Fail
-        let input: &[u8] = &hex! {"60 03 0101ff"};
-        let _res = T::parse_ber(input.into()).expect_err("parsing should have failed");
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let inner_len = self.inner.to_der_len()?;
+        let header = Header::new(self.class(), true, self.tag(), Length::Definite(inner_len));
+        header.write_der_header(writer)
     }
 
-    #[test]
-    fn check_opttagged_explicit() {
-        // **** using parse_ber_optional ****
-        type T1<'a> = TaggedExplicit<bool, BerError<Input<'a>>, 0>;
-
-        // empty -> OK, should return None
-        let input: &[u8] = &hex! {""};
-        let res = T1::parse_ber_optional(input.into()).expect("parsing failed");
-        assert_eq!(res.1, None);
-
-        // incorrect tag -> OK, should return None
-        let input: &[u8] = &hex! {"a1 03 0101ff"};
-        let res = T1::parse_ber_optional(input.into()).expect("parsing failed");
-        assert_eq!(res.1, None);
-
-        // tagged value, correct tag -> Ok
-        let input: &[u8] = &hex! {"a0 03 0101ff"};
-        let (rem, res) = T1::parse_ber_optional(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res.is_some());
-
-        // tagged value, correct tag and invalid content -> Fail
-        let input: &[u8] = &hex! {"a0 03 0102ffff"};
-        let _res = T1::parse_ber_optional(input.into()).expect_err("parsing should have failed");
-
-        // **** using Option<T> ****
-        type T2<'a> = Option<TaggedExplicit<bool, BerError<Input<'a>>, 0>>;
-
-        // empty -> OK, should return None
-        let input: &[u8] = &hex! {""};
-        let res = T2::parse_ber(input.into()).expect("parsing failed");
-        assert_eq!(res.1, None);
-
-        // incorrect tag -> OK, should return None
-        let input: &[u8] = &hex! {"a1 03 0101ff"};
-        let res = T2::parse_ber(input.into()).expect("parsing failed");
-        assert_eq!(res.1, None);
-
-        // tagged value, correct tag -> Ok
-        let input: &[u8] = &hex! {"a0 03 0101ff"};
-        let (rem, res) = T2::parse_ber(input.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert!(res.is_some());
-
-        // tagged value, correct tag and invalid content -> Fail
-        let input: &[u8] = &hex! {"a0 03 0102ffff"};
-        let _res = T2::parse_ber(input.into()).expect_err("parsing should have failed");
-    }
-}
-
-#[cfg(feature = "std")]
-#[cfg(test)]
-mod std_tests {
-    use hex_literal::hex;
-
-    use crate::{BerError, BerParser, Input, TaggedExplicit, ToBer};
-
-    #[test]
-    fn tober_tagged_explicit() {
-        let mut v: Vec<u8> = Vec::new();
-
-        type T<'a> = TaggedExplicit<bool, BerError<Input<'a>>, 0>;
-        let t = T::explicit(true);
-        v.clear();
-        t.ber_encode(&mut v).expect("serialization failed");
-        assert_eq!(&v, &hex! {"a0 03 0101ff"});
-
-        // de-serialize to be sure
-        let (rem, t2) = T::parse_ber((&v).into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(t, t2);
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        self.inner.write_der(writer)
     }
 }

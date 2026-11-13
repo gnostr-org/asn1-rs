@@ -1,46 +1,36 @@
 use crate::ber::*;
-use crate::debug::trace_input;
-use crate::Input;
 use crate::*;
 use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
-use core::convert::TryFrom;
-use nom::bytes::streaming::take;
+use core::convert::{TryFrom, TryInto};
+
+use self::debug::trace;
 
 /// The `Any` object is not strictly an ASN.1 type, but holds a generic description of any object
 /// that could be encoded.
 ///
-/// It contains a header, and a reference to the object content.
+/// It contains a header, and either a reference to or owned data for the object content.
 ///
 /// Note: this type is only provided in **borrowed** version (*i.e.* it cannot own the inner data).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Any<'a> {
     /// The object header
     pub header: Header<'a>,
     /// The object contents
-    pub data: Input<'a>,
+    pub data: &'a [u8],
 }
 
 impl<'a> Any<'a> {
     /// Create a new `Any` from BER/DER header and content
     #[inline]
-    pub const fn new(header: Header<'a>, data: Input<'a>) -> Self {
+    pub const fn new(header: Header<'a>, data: &'a [u8]) -> Self {
         Any { header, data }
-    }
-
-    /// Create a new `Any` from BER/DER header and content
-    #[inline]
-    pub const fn from_header_and_data(header: Header<'a>, data: &'a [u8]) -> Self {
-        Any {
-            header,
-            data: Input::from_slice(data),
-        }
     }
 
     /// Create a new `Any` from a tag, and BER/DER content
     #[inline]
-    pub const fn from_tag_and_data(tag: Tag, data: Input<'a>) -> Self {
+    pub const fn from_tag_and_data(tag: Tag, data: &'a [u8]) -> Self {
         let constructed = matches!(tag, Tag::Sequence | Tag::Set);
         Any {
             header: Header {
@@ -49,7 +39,6 @@ impl<'a> Any<'a> {
                 class: Class::Universal,
                 length: Length::Definite(data.len()),
                 raw_tag: None,
-                raw_header: None,
             },
             data,
         }
@@ -85,6 +74,20 @@ impl<'a> Any<'a> {
         }
     }
 
+    /// Get the bytes representation of the *content*
+    #[inline]
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.data
+    }
+
+    #[inline]
+    pub fn parse_ber<T>(&self) -> ParseResult<'a, T>
+    where
+        T: FromBer<'a>,
+    {
+        T::from_ber(self.data)
+    }
+
     /// Parse a BER value and apply the provided parsing function to content
     ///
     /// After parsing, the sequence object and header are discarded.
@@ -98,14 +101,14 @@ impl<'a> Any<'a> {
         F: FnOnce(&'a [u8]) -> ParseResult<'a, T, E>,
         E: From<Error>,
     {
-        let (rem, any): (_, Any<'a>) = Any::from_ber(bytes).map_err(Err::convert)?;
+        let (rem, any) = Any::from_ber(bytes).map_err(Err::convert)?;
         any.tag()
             .assert_eq(Tag(tag))
             .map_err(|e| Err::Error(e.into()))?;
         any.class()
             .assert_eq(class)
             .map_err(|e| Err::Error(e.into()))?;
-        let (_, res) = op(any.data.into_bytes())?;
+        let (_, res) = op(any.data)?;
         Ok((rem, res))
     }
 
@@ -129,113 +132,30 @@ impl<'a> Any<'a> {
         any.class()
             .assert_eq(class)
             .map_err(|e| Err::Error(e.into()))?;
-        let (_, res) = op(any.data.into_bytes())?;
+        let (_, res) = op(any.data)?;
         Ok((rem, res))
     }
 
-    /// Return an iterator over sub-objects
-    ///
-    /// This makes sense only if `Self` is constructed, but the constructed bit is
-    /// _not_ checked by this function.
-    pub fn iter_elements<Mode: ASN1Mode>(&'a self) -> AnyIterator<'a, BerMode> {
-        AnyIterator::<BerMode>::new(self.data.clone())
-    }
-}
-
-impl Any<'_> {
-    /// Get the bytes representation of the *content*
     #[inline]
-    pub fn as_bytes(&self) -> &'_ [u8] {
-        self.data.as_ref()
-    }
-
-    #[inline]
-    pub fn parse_content_ber<'a, T>(&'a self) -> ParseResult<'a, T>
-    where
-        T: FromBer<'a>,
-    {
-        T::from_ber(self.data.as_ref())
-    }
-
-    #[inline]
-    pub fn parse_content_der<'a, T>(&'a self) -> ParseResult<'a, T>
+    pub fn parse_der<T>(&self) -> ParseResult<'a, T>
     where
         T: FromDer<'a>,
     {
-        T::from_der(self.data.as_ref())
+        T::from_der(self.data)
     }
-}
 
-impl Any<'_> {
     /// Get the content following a BER header
     #[inline]
-    pub fn parse_ber_content<'i>(
-        i: Input<'i>,
-        header: &'_ Header,
-    ) -> IResult<Input<'i>, Input<'i>, BerError<Input<'i>>> {
+    pub fn parse_ber_content<'i>(i: &'i [u8], header: &'_ Header) -> ParseResult<'i, &'i [u8]> {
         header.parse_ber_content(i)
     }
 
     /// Get the content following a DER header
     #[inline]
-    pub fn parse_der_content<'i>(
-        i: Input<'i>,
-        header: &'_ Header,
-    ) -> IResult<Input<'i>, Input<'i>, BerError<Input<'i>>> {
-        header
-            .assert_definite_inner()
-            .map_err(BerError::convert(i.clone()))?;
-        DerMode::get_object_content(header, i, 8)
+    pub fn parse_der_content<'i>(i: &'i [u8], header: &'_ Header) -> ParseResult<'i, &'i [u8]> {
+        header.assert_definite()?;
+        DerParser::get_object_content(i, header, 8)
     }
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! impl_tryfrom_any {
-    (IMPL $lft:lifetime $ty:ty ) => {
-        impl<$lft> core::convert::TryFrom<$crate::Any<$lft>> for $ty {
-            type Error = $crate::Error;
-
-            fn try_from(any: $crate::Any<$lft>) -> Result<Self> {
-                use $crate::BerParser;
-
-                if !<Self as $crate::DynTagged>::accept_tag(any.tag()) {
-                    Err($crate::Error::unexpected_tag(None, any.tag()).into())
-                } else {
-                    let (_, obj) = Self::from_ber_content(&any.header, any.data)
-                        .map_err($crate::Error::from_nom_berr)?;
-                    Ok(obj)
-                }
-            }
-        }
-
-        impl<$lft, 'b> core::convert::TryFrom<&'b $crate::Any<$lft>> for $ty {
-            type Error = $crate::Error;
-
-            fn try_from(any: &'b $crate::Any<$lft>) -> Result<Self> {
-                use $crate::BerParser;
-
-                if !<Self as $crate::DynTagged>::accept_tag(any.tag()) {
-                    Err($crate::Error::unexpected_tag(None, any.tag()).into())
-                } else {
-                    let (_, obj) = Self::from_ber_content(&any.header, any.data.clone())
-                        .map_err($crate::Error::from_nom_berr)?;
-                    Ok(obj)
-                }
-            }
-        }
-    };
-    // variant for lifetime present in <..> (like: OctetString<'i>)
-    ($lft:lifetime @ $ty:ty) => {
-        $crate::impl_tryfrom_any! {
-            IMPL $lft $ty
-        }
-    };
-    ($ty:ty) => {
-        $crate::impl_tryfrom_any! {
-            IMPL 'i $ty
-        }
-    };
 }
 
 macro_rules! impl_any_into {
@@ -246,9 +166,7 @@ macro_rules! impl_any_into {
         #[doc = $asn1]
         #[doc = "`)."]
         pub fn $fn_name(self) -> Result<$ty> {
-            let (_, obj) =
-                <$ty>::from_ber_content(&self.header, self.data).map_err(Error::from_nom_berr)?;
-            Ok(obj)
+            self.try_into()
         }
     };
     ($fn_name:ident => $ty:ty, $asn1:expr) => {
@@ -263,14 +181,9 @@ macro_rules! impl_any_as {
         #[doc = "Attempt to create ASN.1 type `"]
         #[doc = $asn1]
         #[doc = "` from this object."]
-        #[doc = "\n\nNote: this method makes shallow copies of `header` and `data`."]
         #[inline]
         pub fn $fn_name(&self) -> Result<$ty> {
-            // This clone is cheap
-            let data = self.data.clone();
-            let (_, obj) =
-                <$ty>::from_ber_content(&self.header, data).map_err(Error::from_nom_berr)?;
-            Ok(obj)
+            TryFrom::try_from(self)
         }
     };
     ($fn_name:ident => $ty:ty, $asn1:expr) => {
@@ -281,8 +194,7 @@ macro_rules! impl_any_as {
 }
 
 impl<'a> Any<'a> {
-    impl_any_into!(anysequence => AnySequence<'a>, "SEQUENCE");
-    impl_any_into!(bitstring => BitString, "BIT STRING");
+    impl_any_into!(bitstring => BitString<'a>, "BIT STRING");
     impl_any_into!(bmpstring => BmpString<'a>, "BMPString");
     impl_any_into!(bool => bool, "BOOLEAN");
     impl_any_into!(boolean => Boolean, "BOOLEAN");
@@ -307,7 +219,7 @@ impl<'a> Any<'a> {
     /// Attempt to convert object to `Oid` (ASN.1 type: `RELATIVE-OID`).
     pub fn relative_oid(self) -> Result<Oid<'a>> {
         self.header.assert_tag(Tag::RelativeOid)?;
-        let asn1 = Cow::Borrowed(self.data.into_bytes());
+        let asn1 = Cow::Borrowed(self.data);
         Ok(Oid::new_relative(asn1))
     }
     impl_any_into!(printablestring => PrintableString<'a>, "PrintableString");
@@ -328,8 +240,7 @@ impl<'a> Any<'a> {
     impl_any_into!(videotexstring => VideotexString<'a>, "VideotexString");
     impl_any_into!(visiblestring => VisibleString<'a>, "VisibleString");
 
-    impl_any_as!(as_anysequence => AnySequence<'_>, "SEQUENCE");
-    impl_any_as!(as_bitstring => BitString, "BITSTRING");
+    impl_any_as!(as_bitstring => BitString<'_>, "BITSTRING");
     impl_any_as!(as_bmpstring => BmpString<'_>, "BMPString");
     impl_any_as!(as_bool => bool, "BOOLEAN");
     impl_any_as!(as_boolean => Boolean, "BOOLEAN");
@@ -353,9 +264,9 @@ impl<'a> Any<'a> {
     impl_any_as!(as_oid => Oid<'_>, "OBJECT IDENTIFIER");
     impl_any_as!(as_real => Real, "REAL");
     /// Attempt to create ASN.1 type `RELATIVE-OID` from this object.
-    pub fn as_relative_oid(&'a self) -> Result<Oid<'a>> {
+    pub fn as_relative_oid(&self) -> Result<Oid<'a>> {
         self.header.assert_tag(Tag::RelativeOid)?;
-        let asn1 = Cow::Borrowed(self.data.as_bytes2());
+        let asn1 = Cow::Borrowed(self.data);
         Ok(Oid::new_relative(asn1))
     }
     impl_any_as!(as_printablestring => PrintableString<'_>, "PrintableString");
@@ -414,8 +325,33 @@ impl<'a> Any<'a> {
     /// Attempt to get value as `str`, for all known string types
     ///
     /// This function does not allocate data, so it supports all string types except
-    /// `BmpString` and `UniversalString`.
-    pub fn as_any_str(&self) -> Result<&str> {
+    /// `UniversalString`.
+    pub fn as_any_str(&self) -> Result<String> {
+        match self.tag() {
+            Tag::GeneralString
+            | Tag::GraphicString
+            | Tag::Ia5String
+            | Tag::NumericString
+            | Tag::PrintableString
+            | Tag::T61String
+            | Tag::Utf8String
+            | Tag::VideotexString
+            | Tag::VisibleString => {
+                let res = core::str::from_utf8(self.data)?;
+                Ok(res.to_string())
+            }
+            Tag::UniversalString => {
+                let us = UniversalString::try_from(self)?;
+                Ok(us.string())
+            }
+            _ => todo!(),
+        }
+    }
+
+    /// Attempt to get value as `String`, for all known string types
+    ///
+    /// This function allocates data
+    pub fn as_any_string(&self) -> Result<&str> {
         match self.tag() {
             Tag::GeneralString
             | Tag::GraphicString
@@ -427,116 +363,39 @@ impl<'a> Any<'a> {
             | Tag::Utf8String
             | Tag::VideotexString
             | Tag::VisibleString => {
-                let res = core::str::from_utf8(self.data.as_bytes2())?;
+                let res = core::str::from_utf8(self.data)?;
                 Ok(res)
             }
-            _ => Err(Error::BerTypeError),
-        }
-    }
-
-    /// Attempt to get value as `String`, for all known string types
-    ///
-    /// This function allocates data
-    pub fn as_any_string(&self) -> Result<String> {
-        match self.tag() {
-            Tag::GeneralString
-            | Tag::GraphicString
-            | Tag::Ia5String
-            | Tag::NumericString
-            | Tag::PrintableString
-            | Tag::T61String
-            | Tag::Utf8String
-            | Tag::VideotexString
-            | Tag::VisibleString => {
-                let res = core::str::from_utf8(self.data.as_bytes2())?;
-                Ok(res.to_string())
-            }
-            Tag::BmpString => {
-                let us = BmpString::try_from(self)?;
-                Ok(us.string())
-            }
-            Tag::UniversalString => {
-                let us = UniversalString::try_from(self)?;
-                Ok(us.string())
-            }
-            _ => Err(Error::BerTypeError),
+            _ => todo!(),
         }
     }
 }
 
-pub(crate) fn parse_ber_any(input: Input) -> IResult<Input, Any, BerError<Input>> {
-    trace_input("Any", |input| {
-        //
-        let (i, header) = Header::parse_ber(input)?;
-        let (i, data) = BerMode::get_object_content(&header, i, MAX_RECURSION)?;
-        Ok((i, Any { header, data }))
-    })(input)
+pub(crate) fn parse_ber_any(input: &[u8]) -> ParseResult<'_, Any<'_>> {
+    let (i, header) = Header::from_ber(input)?;
+    let (i, data) = BerParser::get_object_content(i, &header, MAX_RECURSION)?;
+    Ok((i, Any { header, data }))
 }
 
-pub(crate) fn parse_der_any(input: Input) -> IResult<Input, Any, BerError<Input>> {
-    trace_input("Any", |input| {
-        let (i, header) = Header::parse_der(input.clone())?;
-        // X.690 section 10.1: The definite form of length encoding shall be used
-        header
-            .length
-            .assert_definite_inner()
-            .map_err(BerError::convert(input))?;
-        let (i, data) = DerMode::get_object_content(&header, i, MAX_RECURSION)?;
-        Ok((i, Any { header, data }))
-    })(input)
+pub(crate) fn parse_der_any(input: &[u8]) -> ParseResult<'_, Any<'_>> {
+    let (i, header) = Header::from_der(input)?;
+    // X.690 section 10.1: The definite form of length encoding shall be used
+    header.length.assert_definite()?;
+    let (i, data) = DerParser::get_object_content(i, &header, MAX_RECURSION)?;
+    Ok((i, Any { header, data }))
 }
 
 impl<'a> FromBer<'a> for Any<'a> {
     #[inline]
     fn from_ber(bytes: &'a [u8]) -> ParseResult<'a, Self> {
-        wrap_ber_parser(parse_ber_any)(bytes)
-    }
-}
-
-impl<'i> BerParser<'i> for Any<'i> {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        let (rem, data) = match header.length {
-            Length::Definite(l) => take(l)(input)?,
-            Length::Indefinite => {
-                // assume entire input was parsed
-                take(input.len())(input)?
-            }
-        };
-        let any = Any {
-            header: header.clone(),
-            data,
-        };
-        Ok((rem, any))
+        trace("Any", parse_ber_any, bytes)
     }
 }
 
 impl<'a> FromDer<'a> for Any<'a> {
     #[inline]
     fn from_der(bytes: &'a [u8]) -> ParseResult<'a, Self> {
-        wrap_ber_parser(parse_der_any)(bytes)
-    }
-}
-
-impl<'i> DerParser<'i> for Any<'i> {
-    type Error = BerError<Input<'i>>;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        let (rem, data) = DerMode::get_object_content(header, input, MAX_RECURSION)?;
-        Ok((
-            rem,
-            Any {
-                header: header.clone(),
-                data,
-            },
-        ))
+        trace("Any", parse_der_any, bytes)
     }
 }
 
@@ -551,21 +410,8 @@ impl CheckDerConstraints for Any<'_> {
 impl DerAutoDerive for Any<'_> {}
 
 impl DynTagged for Any<'_> {
-    fn class(&self) -> Class {
-        self.header.class
-    }
-
-    fn constructed(&self) -> bool {
-        self.header.constructed
-    }
-
     fn tag(&self) -> Tag {
         self.tag()
-    }
-
-    fn accept_tag(_: Tag) -> bool {
-        // For ANY, all tags are accepted
-        true
     }
 }
 
@@ -581,28 +427,35 @@ impl DynTagged for Any<'_> {
 // }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for Any<'_> {
-        type Encoder = BerGenericEncoder;
-
-        fn ber_content_len(&self) -> Length {
-            Length::Definite(self.data.len())
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            target.write_all(self.data.as_bytes2())?;
-            Ok(self.data.len())
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), self.constructed(), self.tag())
-        }
+impl ToDer for Any<'_> {
+    fn to_der_len(&self) -> Result<usize> {
+        let hdr_len = self.header.to_der_len()?;
+        Ok(hdr_len + self.data.len())
     }
 
-    impl_toder_from_tober!(LFT 'a, Any<'a>);
-};
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        // create fake header to have correct length
+        let header = Header::new(
+            self.header.class,
+            self.header.constructed,
+            self.header.tag,
+            Length::Definite(self.data.len()),
+        );
+        let sz = header.write_der_header(writer)?;
+        Ok(sz)
+    }
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        writer.write(self.data).map_err(Into::into)
+    }
+
+    /// Similar to using `to_der`, but uses header without computing length value
+    fn write_der_raw(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let sz = self.header.write_der_header(writer)?;
+        let sz = sz + writer.write(self.data)?;
+        Ok(sz)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -612,28 +465,23 @@ mod tests {
     #[test]
     fn methods_any() {
         let header = Header::new_simple(Tag::Integer);
-        let any = Any::new(header, (&[]).into())
+        let any = Any::new(header, &[])
             .with_class(Class::ContextSpecific)
             .with_tag(Tag(0));
-        assert_eq!(any.as_bytes(), &[] as &[u8]);
+        assert_eq!(any.as_bytes(), &[]);
 
         let input = &hex! {"80 03 02 01 01"};
         let (_, any) = Any::from_ber(input).expect("parsing failed");
 
-        let (_, r) = any
-            .parse_content_ber::<Integer>()
-            .expect("parse_ber failed");
+        let (_, r) = any.parse_ber::<Integer>().expect("parse_ber failed");
         assert_eq!(r.as_u32(), Ok(1));
-        let (_, r) = any
-            .parse_content_der::<Integer>()
-            .expect("parse_der failed");
+        let (_, r) = any.parse_der::<Integer>().expect("parse_der failed");
         assert_eq!(r.as_u32(), Ok(1));
 
         let header = &any.header;
-        let i: Input = (&input[2..]).into();
-        let (_, content) = Any::parse_ber_content(i.clone(), header).unwrap();
+        let (_, content) = Any::parse_ber_content(&input[2..], header).unwrap();
         assert_eq!(content.len(), 3);
-        let (_, content) = Any::parse_der_content(i.clone(), header).unwrap();
+        let (_, content) = Any::parse_der_content(&input[2..], header).unwrap();
         assert_eq!(content.len(), 3);
 
         let (_, any) = Any::from_der(&input[2..]).unwrap();
@@ -641,36 +489,5 @@ mod tests {
         assert_eq!(<Any as DynTagged>::tag(&any), any.tag());
         let int = any.integer().unwrap();
         assert_eq!(int.as_u16(), Ok(1));
-    }
-
-    #[test]
-    fn ber_parser_any() {
-        let input = &hex!("02 01 02 ff ff");
-        let (rem, result) = Any::parse_ber(Input::from(input)).expect("parsing failed");
-        assert_eq!(rem.as_bytes2(), &[0xff, 0xff]);
-        assert_eq!(result.header.tag(), Tag::Integer);
-    }
-
-    #[test]
-    fn parse_ber_indefinite_any() {
-        // Ok: indefinite length, empty object
-        let bytes: &[u8] = &hex!("a3 80 00 00");
-        let (rem, _res) = Any::parse_ber(bytes.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        // dbg!(&_res);
-
-        // Ok: indefinite length, non-empty object
-        let bytes: &[u8] = &hex!("a3 80 0101ff 00 00");
-        let (rem, _res) = Any::parse_ber(bytes.into()).expect("parsing failed");
-        assert!(rem.is_empty());
-        // dbg!(&_res);
-
-        // Fail: indefinite length should be constructed
-        let bytes: &[u8] = &hex!("03 80 00 00");
-        let _ = Any::parse_ber(bytes.into()).expect_err("Parsing should have failed");
-
-        // Fail: indefinite length but no EndOfContent
-        let bytes: &[u8] = &hex!("a3 80 01 02 03 04");
-        let _ = Any::parse_ber(bytes.into()).expect_err("Parsing should have failed");
     }
 }

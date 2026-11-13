@@ -11,6 +11,16 @@ use hex_literal::hex;
 use nom::sequence::pair;
 use std::convert::{TryFrom, TryInto};
 
+const DN: &[u8] = &hex!(
+    "
+30 45 31 0b 30 09 06 03 55 04 06 13 02 46 52
+31 13 30 11 06 03 55 04 08 0c 0a 53 6f 6d 65
+2d 53 74 61 74 65 31 21 30 1f 06 03 55 04 0a
+0c 18 49 6e 74 65 72 6e 65 74 20 57 69 64 67
+69 74 73 20 50 74 79 20 4c 74 64
+"
+);
+
 // Name ::= CHOICE { -- only one possibility for now --
 //     rdnSequence  RDNSequence }
 
@@ -58,7 +68,8 @@ pub struct AttributeTypeAndValue<'a> {
 impl<'a> FromBer<'a> for AttributeTypeAndValue<'a> {
     fn from_ber(bytes: &'a [u8]) -> ParseResult<'a, Self> {
         let (rem, seq) = Sequence::from_der(bytes)?;
-        let (_, (oid, value)) = seq.parse_into(pair(Oid::from_der, AttributeValue::from_der))?;
+        let (_, (oid, value)) =
+            seq.parse_into(|i| pair(Oid::from_der, AttributeValue::from_der)(i))?;
         let attr = AttributeTypeAndValue { oid, value };
         Ok((rem, attr))
     }
@@ -67,7 +78,8 @@ impl<'a> FromBer<'a> for AttributeTypeAndValue<'a> {
 impl<'a> FromDer<'a> for AttributeTypeAndValue<'a> {
     fn from_der(bytes: &'a [u8]) -> ParseResult<'a, Self> {
         let (rem, seq) = Sequence::from_der(bytes)?;
-        let (_, (oid, value)) = seq.parse_into(pair(Oid::from_der, AttributeValue::from_der))?;
+        let (_, (oid, value)) =
+            seq.parse_into(|i| pair(Oid::from_der, AttributeValue::from_der)(i))?;
         let attr = AttributeTypeAndValue { oid, value };
         Ok((rem, attr))
     }
@@ -139,17 +151,7 @@ impl<'a> TryFrom<Any<'a>> for DirectoryString {
 
 #[test]
 fn x509_decode_dn() {
-    let dn_bytes = &hex!(
-        "
-30 45 31 0b 30 09 06 03 55 04 06 13 02 46 52
-31 13 30 11 06 03 55 04 08 0c 0a 53 6f 6d 65
-2d 53 74 61 74 65 31 21 30 1f 06 03 55 04 0a
-0c 18 49 6e 74 65 72 6e 65 74 20 57 69 64 67
-69 74 73 20 50 74 79 20 4c 74 64
-"
-    );
-
-    let (rem, dn) = Name::from_der(dn_bytes).expect("parsing failed");
+    let (rem, dn) = Name::from_der(DN).expect("parsing failed");
     assert!(rem.is_empty());
     // dbg!(&dn);
     assert_eq!(dn.rdn_sequence.len(), 3);

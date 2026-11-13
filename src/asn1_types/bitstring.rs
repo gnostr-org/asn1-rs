@@ -1,164 +1,89 @@
 use crate::*;
-use bitvec::order::Msb0;
-use bitvec::slice::BitSlice;
-use bitvec::vec::BitVec;
-
-const BITSTRING_MAX_RECURSION: usize = 5;
+use alloc::borrow::Cow;
+#[cfg(feature = "bits")]
+use bitvec::{order::Msb0, slice::BitSlice};
+use core::convert::TryFrom;
 
 /// ASN.1 `BITSTRING` type
-///
-/// This objects owns data (it makes one copy during parsing). Internally, it relies on [`BitVec`].
-///
-/// Use [`BitString::as_bitslice`] to access content and [`BitString::as_mut_bitslice`] to modify content.
-///
-/// This type supports constructed objects, but all data segments are appended during parsing
-/// (_i.e_ object structure is not kept after parsing).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BitString {
-    bitvec: BitVec<u8, Msb0>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BitString<'a> {
+    pub unused_bits: u8,
+    pub data: Cow<'a, [u8]>,
 }
 
-impl BitString {
-    /// Build a new `BitString`
-    ///
-    /// # Safety
-    /// panic if `unused_bits` is greater than 7 or greater than input length
-    pub fn new(unused_bits: u8, s: &[u8]) -> Self {
-        let unused_bits = usize::from(unused_bits);
-        let mut bitvec = BitVec::from_slice(s);
-        assert!(unused_bits < 8 && unused_bits < bitvec.len());
-        bitvec.truncate(bitvec.len() - unused_bits);
-
-        BitString { bitvec }
-    }
-
-    /// Gets the length of the `BitString` (number of bits)
-    pub fn len(&self) -> usize {
-        self.bitvec.len()
-    }
-
-    /// Tests if the `BitString` is empty
-    pub fn is_empty(&self) -> bool {
-        self.bitvec.is_empty()
+impl<'a> BitString<'a> {
+    // Length must be >= 1 (first byte is number of ignored bits)
+    pub const fn new(unused_bits: u8, s: &'a [u8]) -> Self {
+        BitString {
+            unused_bits,
+            data: Cow::Borrowed(s),
+        }
     }
 
     /// Test if bit `bitnum` is set
-    ///
-    /// Return false if bit is not set, or if index is outside range.
     pub fn is_set(&self, bitnum: usize) -> bool {
-        self.as_bitslice()
-            .get(bitnum)
-            .map(|bitref| bitref == true)
-            .unwrap_or(false)
-    }
-
-    /// Return a shared `BitSlice` over the object data.
-    pub fn as_bitslice(&self) -> &BitSlice<u8, Msb0> {
-        self.bitvec.as_bitslice()
-    }
-
-    /// Return a mutable `BitSlice` over the object data.
-    pub fn as_mut_bitslice(&mut self) -> &mut BitSlice<u8, Msb0> {
-        self.bitvec.as_mut_bitslice()
-    }
-
-    /// Return a view over bit-slice bytes
-    pub fn as_raw_slice(&self) -> &[u8] {
-        self.bitvec.as_raw_slice()
-    }
-}
-
-impl AsRef<[u8]> for BitString {
-    fn as_ref(&self) -> &[u8] {
-        self.as_raw_slice()
-    }
-}
-
-impl_tryfrom_any!(BitString);
-
-impl From<&BitSlice<u8, Msb0>> for BitString {
-    fn from(slice: &BitSlice<u8, Msb0>) -> Self {
-        let bitvec = BitVec::from_bitslice(slice);
-        Self { bitvec }
-    }
-}
-
-impl<'i> BerParser<'i> for BitString {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall either be primitive or constructed (X.690: 8.6.1)
-
-        if !header.constructed() {
-            let (rem, data) = ber_get_content(header, input)?;
-
-            if data.is_empty() {
-                return Err(BerError::nom_err_input(&data, InnerError::InvalidLength));
-            }
-
-            // safety: data cannot be empty (tested just above)
-            let (ignored, bytes) = data.as_bytes2().split_at(1);
-
-            // handle unused bits
-            // safety: we have split at index 1
-            match ignored[0] {
-                ignored @ 0..=7 => {
-                    let mut bitvec = BitVec::from_slice(bytes);
-                    let new_len = bitvec
-                        .len()
-                        .checked_sub(usize::from(ignored))
-                        .ok_or(BerError::nom_err_input(&data, InnerError::InvalidLength))?;
-                    bitvec.truncate(new_len);
-                    Ok((rem, Self { bitvec }))
-                }
-                _ => Err(BerError::nom_err_input(
-                    &data,
-                    InnerError::invalid_value(Tag::BitString, "Invalid unused bits"),
-                )),
-            }
-        } else {
-            // parse_segmented_bitstring(&header, input, BITSTRING_MAX_RECURSION)?
-            parse_ber_segmented(header, input, BITSTRING_MAX_RECURSION)
+        let byte_pos = bitnum / 8;
+        if byte_pos >= self.data.len() {
+            return false;
         }
+        let b = 7 - (bitnum % 8);
+        (self.data[byte_pos] & (1 << b)) != 0
+    }
+
+    /// Constructs a shared `&BitSlice` reference over the object data.
+    #[cfg(feature = "bits")]
+    pub fn as_bitslice(&self) -> Option<&BitSlice<u8, Msb0>> {
+        BitSlice::<_, Msb0>::try_from_slice(&self.data).ok()
     }
 }
 
-impl<'i> DerParser<'i> for BitString {
-    type Error = BerError<Input<'i>>;
-
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 10.2)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-
-        <BitString>::from_ber_content(header, input)
+impl AsRef<[u8]> for BitString<'_> {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
     }
 }
 
-impl CheckDerConstraints for BitString {
+impl<'a> TryFrom<Any<'a>> for BitString<'a> {
+    type Error = Error;
+
+    fn try_from(any: Any<'a>) -> Result<BitString<'a>> {
+        TryFrom::try_from(&any)
+    }
+}
+
+// non-consuming version
+impl<'a, 'b> TryFrom<&'b Any<'a>> for BitString<'a> {
+    type Error = Error;
+
+    fn try_from(any: &'b Any<'a>) -> Result<BitString<'a>> {
+        any.tag().assert_eq(Self::TAG)?;
+        if any.data.is_empty() {
+            return Err(Error::InvalidLength);
+        }
+        let s = any.data;
+        let (unused_bits, data) = (s[0], Cow::Borrowed(&s[1..]));
+        Ok(BitString { unused_bits, data })
+    }
+}
+
+impl CheckDerConstraints for BitString<'_> {
     fn check_constraints(any: &Any) -> Result<()> {
         // X.690 section 10.2
         any.header.assert_primitive()?;
         // Check that padding bits are all 0 (X.690 section 11.2.1)
-        let s = any.data.as_bytes2();
-        match s.len() {
+        match any.data.len() {
             0 => Err(Error::InvalidLength),
             1 => {
                 // X.690 section 11.2.2 Note 2
-                if s[0] == 0 {
+                if any.data[0] == 0 {
                     Ok(())
                 } else {
                     Err(Error::InvalidLength)
                 }
             }
             len => {
-                let unused_bits = s[0];
-                let last_byte = s[len - 1];
+                let unused_bits = any.data[0];
+                let last_byte = any.data[len - 1];
                 if last_byte.trailing_zeros() < unused_bits as u32 {
                     return Err(Error::DerConstraintFailed(DerConstraint::UnusedBitsNotZero));
                 }
@@ -169,55 +94,45 @@ impl CheckDerConstraints for BitString {
     }
 }
 
-impl DerAutoDerive for BitString {}
+impl DerAutoDerive for BitString<'_> {}
 
-impl Tagged for BitString {
+impl Tagged for BitString<'_> {
     const TAG: Tag = Tag::BitString;
 }
 
-impl Appendable for BitString {
-    fn append(&mut self, other: &mut Self) {
-        self.bitvec.append(&mut other.bitvec);
+#[cfg(feature = "std")]
+impl ToDer for BitString<'_> {
+    fn to_der_len(&self) -> Result<usize> {
+        let sz = self.data.len();
+        if sz < 127 {
+            // 1 (class+tag) + 1 (length) +  1 (unused bits) + len
+            Ok(3 + sz)
+        } else {
+            // 1 (class+tag) + n (length) + 1 (unused bits) + len
+            let n = Length::Definite(sz + 1).to_der_len()?;
+            Ok(2 + n + sz)
+        }
+    }
+
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let header = Header::new(
+            Class::Universal,
+            false,
+            Self::TAG,
+            Length::Definite(1 + self.data.len()),
+        );
+        header.write_der_header(writer)
+    }
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let sz = writer.write(&[self.unused_bits])?;
+        let sz = sz + writer.write(&self.data)?;
+        Ok(sz)
     }
 }
 
-#[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for BitString {
-        type Encoder = Primitive<{ Tag::BitString.0 }>;
-
-        fn ber_content_len(&self) -> Length {
-            let len = 1 + ((self.len() + 7) / 8);
-            Length::Definite(len)
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            let data = self.as_raw_slice();
-            // ignored bits
-            let ignored = (8 * data.len()) - self.len();
-            target.write_all(&[ignored as u8])?;
-            // content
-            target.write_all(data)?;
-
-            Ok(1 + data.len())
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (Self::CLASS, false, Self::TAG)
-        }
-    }
-
-    impl_toder_from_tober!(TY BitString);
-};
-
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
-
-    use crate::{parse_ber_segmented, BerParser, Header, Input};
-
     use super::BitString;
 
     #[test]
@@ -229,72 +144,14 @@ mod tests {
         assert!(obj.is_set(17));
     }
 
+    #[cfg(feature = "bits")]
     #[test]
     fn test_bitstring_to_bitvec() {
         let obj = BitString::new(0, &[0x0f, 0x00, 0x40]);
-        let bv = obj.as_bitslice();
+        let bv = obj.as_bitslice().expect("could not get bitslice");
         assert_eq!(bv.get(0).as_deref(), Some(&false));
         assert_eq!(bv.get(7).as_deref(), Some(&true));
         assert_eq!(bv.get(9).as_deref(), Some(&false));
         assert_eq!(bv.get(17).as_deref(), Some(&true));
-    }
-
-    #[test]
-    fn test_bitstring_parse_segmented_primitive() {
-        //--- Ok: valid data (primitive)
-        // example data from X.690 section 8.6.4.2
-        let bytes = &hex!("0307 040A3B5F291CD0");
-        let (data, header) = Header::parse_ber(Input::from(bytes)).expect("header");
-        let (rem, b) = parse_ber_segmented::<BitString>(&header, data, 5).expect("parsing failed");
-        assert!(rem.is_empty());
-        // compare bitvector length to bitstring bytes, minus ignored bits
-        assert_eq!(b.len(), bytes[3..].len() * 8 - usize::from(bytes[2]));
-
-        //--- Fail: invalid length (only ignored bits)
-        let bytes = &hex!("0301 04");
-        let (data, header) = Header::parse_ber(Input::from(bytes)).expect("header");
-        let _ = parse_ber_segmented::<BitString>(&header, data, 5).expect_err("invalid length");
-
-        //--- Fail: invalid length (invalid ignored bits)
-        let bytes = &hex!("0302 0901");
-        let (data, header) = Header::parse_ber(Input::from(bytes)).expect("header");
-        let _ = parse_ber_segmented::<BitString>(&header, data, 5).expect_err("invalid length");
-    }
-
-    #[test]
-    fn test_bitstring_parse_segmented_constructed() {
-        //--- Ok: valid data (primitive)
-        // example data from X.690 section 8.6.4.2
-        let bytes = &hex!(
-            "23 80\
-            0303 000A3B\
-            0305 045F291CD0\
-            00 00"
-        );
-        let (data, header) = Header::parse_ber(Input::from(bytes)).expect("header");
-        let (rem, b) = parse_ber_segmented::<BitString>(&header, data, 5).expect("parsing failed");
-        assert!(rem.is_empty());
-        assert_eq!(b.len(), 44);
-
-        // Fail: hit recursion limit
-        let (data, header) = Header::parse_ber(Input::from(bytes)).expect("header");
-        let _ = parse_ber_segmented::<BitString>(&header, data, 1).expect_err("recursion limit");
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use bitvec::{bits, order::Msb0};
-        use hex_literal::hex;
-
-        use crate::{BitString, ToBer};
-
-        #[test]
-        fn tober_bitstring() {
-            let immut = bits![u8, Msb0; 0, 1, 0, 0, 1, 0, 0, 1];
-            let bitstring = BitString::from(immut);
-            let mut v: Vec<u8> = Vec::new();
-            bitstring.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"03020049"});
-        }
     }
 }

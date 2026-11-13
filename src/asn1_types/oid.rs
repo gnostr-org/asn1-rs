@@ -6,9 +6,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use core::{fmt, iter::FusedIterator, marker::PhantomData, ops::Shl, str::FromStr};
+use core::{
+    convert::TryFrom, fmt, iter::FusedIterator, marker::PhantomData, ops::Shl, str::FromStr,
+};
 use displaydoc::Display;
-use nom::Input as _;
 use num_traits::Num;
 use thiserror::Error;
 
@@ -41,37 +42,21 @@ pub struct Oid<'a> {
     relative: bool,
 }
 
-impl_tryfrom_any!('i @ Oid<'i>);
+impl<'a> TryFrom<Any<'a>> for Oid<'a> {
+    type Error = Error;
 
-impl<'i> BerParser<'i> for Oid<'i> {
-    type Error = BerError<Input<'i>>;
-
-    fn from_ber_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // Encoding shall be primitive (X.690: 8.19.1)
-        header.assert_primitive_input(&input).map_err(Err::Error)?;
-
-        // Each sub-identifier is represented as a series of (one or more) octets (X.690: 8.19.2)
-        if input.is_empty() {
-            return Err(BerError::nom_err_input(&input, InnerError::InvalidLength));
-        }
-
-        let (rem, data) = input.take_split(input.len());
-        Ok((rem, Oid::new(Cow::Borrowed(data.as_bytes2()))))
+    fn try_from(any: Any<'a>) -> Result<Self> {
+        TryFrom::try_from(&any)
     }
 }
 
-impl<'i> DerParser<'i> for Oid<'i> {
-    type Error = BerError<Input<'i>>;
+impl<'a, 'b> TryFrom<&'b Any<'a>> for Oid<'a> {
+    type Error = Error;
 
-    fn from_der_content(
-        header: &'_ Header<'i>,
-        input: Input<'i>,
-    ) -> IResult<Input<'i>, Self, Self::Error> {
-        // parsing is similar as for BER
-        Self::from_ber_content(header, input)
+    fn try_from(any: &'b Any<'a>) -> Result<Self> {
+        // check that any.data.last().unwrap() >> 7 == 0u8
+        let asn1 = Cow::Borrowed(any.data);
+        Ok(Oid::new(asn1))
     }
 }
 
@@ -85,43 +70,42 @@ impl CheckDerConstraints for Oid<'_> {
 
 impl DerAutoDerive for Oid<'_> {}
 
-impl DynTagged for Oid<'_> {
-    fn tag(&self) -> Tag {
-        if self.relative {
-            Tag::RelativeOid
-        } else {
-            Tag::Oid
-        }
-    }
-
-    fn accept_tag(tag: Tag) -> bool {
-        tag == Tag::Oid || tag == Tag::RelativeOid
-    }
+impl Tagged for Oid<'_> {
+    const TAG: Tag = Tag::Oid;
 }
 
 #[cfg(feature = "std")]
-const _: () = {
-    use std::io::Write;
-
-    impl ToBer for Oid<'_> {
-        type Encoder = BerGenericEncoder;
-
-        fn ber_content_len(&self) -> Length {
-            Length::Definite(self.asn1.len())
-        }
-
-        fn ber_write_content<W: Write>(&self, target: &mut W) -> SerializeResult<usize> {
-            target.write_all(&self.asn1)?;
-            Ok(self.asn1.len())
-        }
-
-        fn ber_tag_info(&self) -> (Class, bool, Tag) {
-            (self.class(), self.constructed(), self.tag())
-        }
+impl ToDer for Oid<'_> {
+    fn to_der_len(&self) -> Result<usize> {
+        // OID/REL-OID tag will not change header size, so we don't care here
+        let header = Header::new(
+            Class::Universal,
+            false,
+            Self::TAG,
+            Length::Definite(self.asn1.len()),
+        );
+        Ok(header.to_der_len()? + self.asn1.len())
     }
 
-    impl_toder_from_tober!(LFT 'a, Oid<'a>);
-};
+    fn write_der_header(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        let tag = if self.relative {
+            Tag::RelativeOid
+        } else {
+            Tag::Oid
+        };
+        let header = Header::new(
+            Class::Universal,
+            false,
+            tag,
+            Length::Definite(self.asn1.len()),
+        );
+        header.write_der_header(writer)
+    }
+
+    fn write_der_content(&self, writer: &mut dyn std::io::Write) -> SerializeResult<usize> {
+        writer.write(&self.asn1).map_err(Into::into)
+    }
+}
 
 fn encode_relative(ids: &'_ [u64]) -> impl Iterator<Item = u8> + '_ {
     ids.iter().flat_map(|id| {
@@ -244,7 +228,7 @@ impl<'a> Oid<'a> {
         } else {
             let mut ret = String::with_capacity(self.asn1.len() * 3);
             for (i, o) in self.asn1.iter().enumerate() {
-                ret.push_str(&format!("{o:02x}"));
+                ret.push_str(&format!("{:02x}", o));
                 if i + 1 != self.asn1.len() {
                     ret.push(' ');
                 }
@@ -302,7 +286,7 @@ impl<'a> Oid<'a> {
         let (rem, any) = Any::from_ber(bytes)?;
         any.header.assert_primitive()?;
         any.header.assert_tag(Tag::RelativeOid)?;
-        let asn1 = Cow::Borrowed(any.data.as_bytes2());
+        let asn1 = Cow::Borrowed(any.data);
         Ok((rem, Oid::new_relative(asn1)))
     }
 
@@ -310,7 +294,7 @@ impl<'a> Oid<'a> {
         let (rem, any) = Any::from_der(bytes)?;
         any.header.assert_tag(Tag::RelativeOid)?;
         Self::check_constraints(&any)?;
-        let asn1 = Cow::Borrowed(any.data.as_bytes2());
+        let asn1 = Cow::Borrowed(any.data);
         Ok((rem, Oid::new_relative(asn1)))
     }
 
@@ -482,7 +466,7 @@ macro_rules! oid {
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use crate::{BerParser, DerParser, FromDer, Input, Length, Oid, ToDer};
+    use crate::{FromDer, Oid, ToDer};
     use hex_literal::hex;
 
     #[test]
@@ -513,7 +497,7 @@ mod tests {
     #[test]
     fn oid_to_der() {
         let oid = super::oid! {1.2.840.113549.1};
-        assert_eq!(oid.der_content_len(), Length::Definite(7));
+        assert_eq!(oid.to_der_len(), Ok(9));
         let v = oid.to_der_vec().expect("could not serialize");
         assert_eq!(&v, &hex! {"06 07 2a 86 48 86 f7 0d 01"});
         let (_, oid2) = Oid::from_der(&v).expect("could not re-parse");
@@ -540,46 +524,5 @@ mod tests {
 
         let oid = foo!(1 2 3);
         assert_eq!(oid, oid! {1.2.3});
-    }
-
-    #[test]
-    fn parse_ber_oid() {
-        let input = &hex!("06 09 2a 86 48 86 f7 0d 01 01 05");
-        let (rem, result) = Oid::parse_ber(Input::from(input)).expect("parsing failed");
-        let expected = Oid::from(&[1, 2, 840, 113_549, 1, 1, 5]).unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn parse_der_oid() {
-        let input = &hex!("06 09 2a 86 48 86 f7 0d 01 01 05");
-        let (rem, result) = Oid::parse_der(Input::from(input)).expect("parsing failed");
-        let expected = Oid::from(&[1, 2, 840, 113_549, 1, 1, 5]).unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(result, expected);
-    }
-
-    #[cfg(feature = "std")]
-    mod tests_std {
-        use hex_literal::hex;
-
-        use crate::{Oid, ToBer};
-
-        #[test]
-        fn tober_oid() {
-            let oid = Oid::from(&[1, 2, 840, 113_549, 1, 1, 5]).unwrap();
-            let mut v: Vec<u8> = Vec::new();
-            oid.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"06 09 2a864886f70d010105"});
-        }
-
-        #[test]
-        fn tober_rel_oid() {
-            let oid = oid!(rel 1.2);
-            let mut v: Vec<u8> = Vec::new();
-            oid.ber_encode(&mut v).expect("serialization failed");
-            assert_eq!(&v, &hex! {"0d 02 0102"});
-        }
     }
 }

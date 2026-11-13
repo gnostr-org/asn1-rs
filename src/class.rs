@@ -5,7 +5,7 @@ use core::fmt;
 pub struct BerClassFromIntError(pub(crate) ());
 
 /// BER Object class of tag
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Class {
     /// `Universal` class of tags (`0b00`)
@@ -38,17 +38,6 @@ impl Class {
             })
         }
     }
-
-    #[allow(clippy::panic)]
-    pub const fn new_unwrap(value: u8) -> Self {
-        match value {
-            0b00 => Class::Universal,
-            0b01 => Class::Application,
-            0b10 => Class::ContextSpecific,
-            0b11 => Class::Private,
-            _ => panic!("Value outside range"),
-        }
-    }
 }
 
 impl fmt::Display for Class {
@@ -59,7 +48,7 @@ impl fmt::Display for Class {
             Class::ContextSpecific => "CONTEXT-SPECIFIC",
             Class::Private => "PRIVATE",
         };
-        write!(f, "{s}")
+        write!(f, "{}", s)
     }
 }
 
